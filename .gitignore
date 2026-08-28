@@ -1,0 +1,36 @@
+.tools/
+.artifact_work/
+app/**/__pycache__/
+app/**/*.pyc
+app/build/
+app/dist/
+
+# Dependências e runtimes locais (reinstaláveis)
+app/node_modules/
+**/node_modules/
+app/vendor_ocr/
+app/runtime_tcl/
+
+# Capturas e dados reais de operação
+app/runtime_captures/
+app/app/
+outputs/
+evidencias/
+Backups Fechamento/
+runtime_retest_a/
+
+# Planilhas, pacotes gerados, inspeções e referências locais
+*.xlsx
+*.xls
+*.xlsm
+*.zip
+*.inspect.ndjson
+reference_*.json
+runtime_*.json
+
+# Logs e arquivos temporários
+*.log
+*.err
+*.tmp
+.DS_Store
+Thumbs.db
