@@ -66,6 +66,14 @@ def main() -> None:
             analysis = VisionAnalysis.from_dict(previous)
         else:
             analysis = analyze_image(image_path, args.output / "evidencias")
+            # Persist each expensive OCR result immediately. A large batch can
+            # then resume safely after a shutdown or an interrupted run.
+            analysis.save(result_path)
+            print(json.dumps({
+                "foto": str(image_path),
+                "resultado": str(result_path),
+                "etapa": "leitura_concluida_e_salva",
+            }, ensure_ascii=False), flush=True)
         processed.append((image_path, result_path, analysis, reused))
     apply_group_context([item[2] for item in processed])
     summaries = []
