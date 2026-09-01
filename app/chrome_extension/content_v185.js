@@ -13,6 +13,7 @@ const WL_LOADING_RECENT = "carregar mensagens recentes...";
 let wlRunningSession = "";
 let wlAttachmentErrors = [];
 let wlNavigationStage = "não iniciado";
+let wlNavigationDateReached = false;
 
 function wlSleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -235,8 +236,10 @@ function wlFindGotoDateButton(root = document) {
 
 async function wlNavigateToDate(panel, config) {
   wlNavigationStage = "iniciando";
+  wlNavigationDateReached = false;
   if (wlHasDate(panel, config.start_label)) {
     wlNavigationStage = "data já visível";
+    wlNavigationDateReached = true;
     return true;
   }
   const main = document.querySelector("#main");
@@ -273,7 +276,7 @@ async function wlNavigateToDate(panel, config) {
     if (wlCalendarGrid()) break;
     await wlSleep(100);
   }
-  const calendarGrid = wlCalendarGrid();
+  let calendarGrid = wlCalendarGrid();
   if (!calendarGrid) {
     wlNavigationStage = "calendário não abriu";
     return false;
@@ -294,22 +297,56 @@ async function wlNavigateToDate(panel, config) {
   const desiredMonth = `${months[monthIndex]} de ${year}`;
 
   for (let attempt = 0; attempt < 36; attempt += 1) {
-    const heading = Array.from(document.querySelectorAll('[role="heading"], h2')).find(
+    // O WhatsApp substitui o calendário inteiro ao trocar de mês. Sempre
+    // recupere a grade viva; consultar a grade anterior fazia agosto ser
+    // procurado no DOM já removido de setembro.
+    calendarGrid = wlCalendarGrid();
+    if (!calendarGrid) {
+      wlNavigationStage = "calendário desapareceu ao trocar de mês";
+      return false;
+    }
+    const calendarRoot = calendarGrid.closest('[role="dialog"]') || document;
+    const heading = Array.from(calendarRoot.querySelectorAll('[role="heading"], h2')).find(
       (element) => /\bde\s+\d{4}\b/.test(wlNormalize(element.textContent || ""))
     );
-    const currentMonth = wlNormalize(heading?.textContent || "");
+    const currentMonth = wlNormalize(
+      `${heading?.textContent || ""} ${calendarGrid.innerText || calendarGrid.textContent || ""}`
+    );
     if (currentMonth.includes(desiredMonth)) break;
-    const previous = Array.from(document.querySelectorAll(buttonSelector)).find(
+    const previous = Array.from(calendarRoot.querySelectorAll(buttonSelector)).find(
       (button) => wlNormalize(wlAccessibleText(button)).includes("mes anterior")
     );
     if (!previous || previous.disabled) {
       wlNavigationStage = "mês desejado não disponível";
       return false;
     }
+    const previousGrid = calendarGrid;
     previous.click();
-    await wlSleep(200);
+    for (let wait = 0; wait < 20; wait += 1) {
+      await wlSleep(100);
+      const refreshedGrid = wlCalendarGrid();
+      const refreshedRoot = refreshedGrid?.closest('[role="dialog"]') || document;
+      const refreshedHeading = Array.from(
+        refreshedRoot.querySelectorAll('[role="heading"], h2')
+      ).find((element) =>
+        /\bde\s+\d{4}\b/.test(wlNormalize(element.textContent || ""))
+      );
+      const refreshedMonth = wlNormalize(
+        `${refreshedHeading?.textContent || ""} ` +
+        `${refreshedGrid?.innerText || refreshedGrid?.textContent || ""}`
+      );
+      if (
+        refreshedGrid &&
+        (refreshedGrid !== previousGrid || refreshedMonth !== currentMonth)
+      ) break;
+    }
   }
 
+  calendarGrid = wlCalendarGrid();
+  if (!calendarGrid) {
+    wlNavigationStage = "calendário indisponível para selecionar o dia";
+    return false;
+  }
   const desiredDate = `${day} de ${months[monthIndex]} de ${year}`;
   const dateElement = Array.from(calendarGrid.querySelectorAll('[role="gridcell"]')).find(
     (element) =>
@@ -321,6 +358,7 @@ async function wlNavigateToDate(panel, config) {
     return false;
   }
   wlNavigationStage = "selecionando dia";
+  wlNavigationDateReached = true;
   const trustedClick = await wlRequestTrustedClick(dateElement);
   if (!trustedClick) dateElement.click();
   const found = await new Promise((resolve) => {
@@ -1026,6 +1064,7 @@ async function wlCollectPeriodEvidence(panel, config, base) {
   let olderLoads = 0;
   let calendarAttempts = 0;
   let calendarDatesFound = 0;
+  let calendarDatesReached = 0;
   const uploadedSources = new Set();
 
   for (let step = 0; step < 300; step += 1) {
@@ -1109,11 +1148,13 @@ async function wlCollectPeriodEvidence(panel, config, base) {
     }
   }
 
-  for (const label of wlDateLabelsInRange(config.start_label, config.end_label)) {
+  const periodLabels = wlDateLabelsInRange(config.start_label, config.end_label);
+  for (const label of periodLabels) {
     panel = document.querySelector('[data-testid="conversation-panel-messages"]') || panel;
     calendarAttempts += 1;
     const dateFound = await wlNavigateToDate(panel, { ...config, start_label: label });
     if (dateFound) calendarDatesFound += 1;
+    if (wlNavigationDateReached) calendarDatesReached += 1;
     await wlSleep(500);
     await wlCloseMessageSearch();
     panel = document.querySelector('[data-testid="conversation-panel-messages"]') || panel;
@@ -1129,6 +1170,7 @@ async function wlCollectPeriodEvidence(panel, config, base) {
       ...wlSummarizeInventory(inventory),
       calendar_attempts: calendarAttempts,
       calendar_dates_found: calendarDatesFound,
+      calendar_dates_reached: calendarDatesReached,
       message: `Calendário: ${label} (${calendarDatesFound} datas confirmadas).`,
     });
   }
@@ -1147,6 +1189,10 @@ async function wlCollectPeriodEvidence(panel, config, base) {
     older_loads: olderLoads,
     calendar_attempts: calendarAttempts,
     calendar_dates_found: calendarDatesFound,
+    calendar_dates_reached: calendarDatesReached,
+    period_scan_complete: Boolean(periodLabels.length) &&
+      calendarAttempts === periodLabels.length &&
+      calendarDatesReached === periodLabels.length,
   };
 }
 
@@ -1624,7 +1670,9 @@ async function wlAnalyze(config) {
   const evidence = await wlCollectPeriodEvidence(panel, config, base);
   // A quinzena can begin with a day without messages. Use the first active
   // date found inside the interval instead of requiring the exact start day.
-  startDateFound = startDateFound || Boolean(evidence.start_date_observed);
+  const periodScanComplete = Boolean(evidence.period_scan_complete);
+  startDateFound = periodScanComplete &&
+    (startDateFound || Boolean(evidence.start_date_observed));
   const effectiveStart = evidence.first_period_date || config.start_label;
   wlPost({
     ...base,
@@ -1635,8 +1683,11 @@ async function wlAnalyze(config) {
     sync_waits: syncWaits,
     sync_in_progress: syncInProgress && !startDateFound,
     ...evidence,
+    period_scan_complete: periodScanComplete,
     attachment_errors: wlAttachmentErrors.slice(-20),
-    message: startDateFound
+    message: !periodScanComplete
+      ? "Leitura incompleta: nem todos os dias da quinzena foram percorridos. A revisão foi bloqueada."
+      : startDateFound
       ? (effectiveStart === config.start_label
         ? `Histórico comprovado desde ${config.start_label}.`
         : `Sem movimento em ${config.start_label}; primeira evidência reconhecida em ${effectiveStart}.`)

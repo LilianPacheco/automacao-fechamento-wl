@@ -119,6 +119,7 @@ class WhatsAppProbeResult:
     group_found: bool
     start_date_found: bool
     start_date: str
+    period_scan_complete: bool = False
     group_name: str = GROUP_NAME
     load_attempts: int = 0
     sync_waits: int = 0
@@ -140,6 +141,7 @@ class WhatsAppProbeResult:
             group_found=bool(data.get("group_found")),
             start_date_found=bool(data.get("start_date_found")),
             start_date=str(data.get("start_date", "")),
+            period_scan_complete=bool(data.get("period_scan_complete")),
             group_name=str(data.get("group_name", GROUP_NAME)),
             load_attempts=int(data.get("load_attempts", 0)),
             sync_waits=int(data.get("sync_waits", 0)),
@@ -202,16 +204,18 @@ def restrict_result_to_period(
         for attachment in result.captured_attachments
         if belongs_to_valid_evidence(attachment.message_id)
     ]
-    valid_album_ids = {attachment.message_id for attachment in valid_attachments}
     valid_albums = [
         album for album in result.incomplete_albums
-        if album.message_id in valid_album_ids
+        if belongs_to_valid_evidence(album.message_id)
     ]
     stake_messages = [
         evidence.stake_text for evidence in valid_evidences if evidence.stake_text
     ]
     excluded = len(result.evidences) - len(valid_evidences)
-    period_found = result.start_date_found or bool(valid_evidences)
+    # Evidências isoladas não comprovam a quinzena inteira. Somente uma
+    # varredura concluída pode liberar a revisão; isso impede que um recorte
+    # começando, por exemplo, no dia 27 seja aceito para o período 16–31.
+    period_found = result.start_date_found and result.period_scan_complete
     first_evidence_date = ""
     if valid_evidences:
         first_evidence_date = min(

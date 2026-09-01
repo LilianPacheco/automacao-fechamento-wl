@@ -55,7 +55,8 @@ class PeriodTests(unittest.TestCase):
         result = WhatsAppProbeResult.from_dict({
             "connected": True,
             "group_found": True,
-            "start_date_found": False,
+            "start_date_found": True,
+            "period_scan_complete": True,
             "start_date": "02/08/2026",
             "evidences": [
                 {"message_id": "old", "message_date": "02/08/2026", "image_count": 1},
@@ -82,6 +83,36 @@ class PeriodTests(unittest.TestCase):
         self.assertTrue(filtered.start_date_found)
         self.assertEqual(filtered.evidences[0].quantity_hint, 21)
         self.assertIn("primeira evidência reconhecida em 18/08/2026", filtered.message)
+
+    def test_partial_period_evidence_never_releases_review(self) -> None:
+        result = WhatsAppProbeResult.from_dict({
+            "connected": True,
+            "group_found": True,
+            "start_date_found": True,
+            "period_scan_complete": False,
+            "start_date": "16/08/2026",
+            "evidences": [{
+                "message_id": "late-album",
+                "message_date": "27/08/2026",
+                "image_count": 5,
+            }],
+            "incomplete_albums": [{
+                "message_id": "late-album",
+                "expected": 5,
+                "captured": 0,
+            }],
+        })
+
+        filtered = restrict_result_to_period(
+            result,
+            date(2026, 8, 16),
+            date(2026, 8, 31),
+        )
+
+        self.assertFalse(filtered.start_date_found)
+        self.assertFalse(filtered.period_scan_complete)
+        self.assertEqual(len(filtered.incomplete_albums), 1)
+
 
     def test_photo_caption_quantity_replaces_default_piece_count(self) -> None:
         result = WhatsAppProbeResult.from_dict({

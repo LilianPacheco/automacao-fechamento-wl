@@ -41,6 +41,19 @@ class ReviewHtmlBehaviorTests(unittest.TestCase):
             manifest["content_scripts"][0]["js"],
             ["quantity.js", "content_v185.js"],
         )
+        self.assertEqual(manifest["version"], "1.8.12")
+
+    def test_reader_reacquires_calendar_after_changing_month(self) -> None:
+        reader = (
+            Path(__file__).resolve().parents[1]
+            / "chrome_extension"
+            / "content_v185.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("calendarGrid = wlCalendarGrid();", reader)
+        self.assertIn("calendar_dates_reached: calendarDatesReached", reader)
+        self.assertIn("period_scan_complete: Boolean(periodLabels.length)", reader)
+        self.assertIn("Leitura incompleta: nem todos os dias", reader)
 
     def test_only_situation_select_changes_card_status(self) -> None:
         script = (

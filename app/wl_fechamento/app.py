@@ -358,7 +358,10 @@ class FechamentoApp(tk.Tk):
     ) -> None:
         self.last_whatsapp_result = result
         self.last_probe_period = period
-        if result.incomplete_albums:
+        if not result.period_scan_complete:
+            self.status_var.set("Leitura incompleta; revisão bloqueada")
+            self._set_status("warning")
+        elif result.incomplete_albums:
             self.status_var.set("Evidências encontradas; álbuns incompletos")
             self._set_status("warning")
         elif result.start_date_found:
@@ -419,6 +422,10 @@ class FechamentoApp(tk.Tk):
         details = [
             f"• Conexão: {'OK' if result.connected else 'não'}",
             f"• Grupo correto: {'OK' if result.group_found else 'não encontrado'}",
+            (
+                "• Cobertura da quinzena: "
+                f"{'completa' if result.period_scan_complete else 'incompleta'}"
+            ),
             start_check,
             f"• Etapas de carregamento: {result.load_attempts}",
             f"• Esperas pela sincronização: {result.sync_waits}",
@@ -441,12 +448,22 @@ class FechamentoApp(tk.Tk):
         ]
         self._set_details(details)
         self.next_button.configure(state="normal", text="Atualizar leitura das evidências")
-        if result.captured_attachments and not result.incomplete_albums:
+        if (
+            result.period_scan_complete
+            and result.start_date_found
+            and result.captured_attachments
+            and not result.incomplete_albums
+        ):
             self.review_button.configure(state="normal")
             # Open the temporary review automatically when the read produced
             # period evidence; the button remains available for reopening it.
             if result.evidences:
                 self.after(350, self._start_photo_review)
+        elif not result.period_scan_complete:
+            self.review_button.configure(
+                state="disabled",
+                text="Concluir leitura de toda a quinzena antes da revisão",
+            )
         elif result.incomplete_albums:
             self.review_button.configure(
                 state="disabled",
