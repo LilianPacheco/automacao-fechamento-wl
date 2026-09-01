@@ -9,7 +9,12 @@ from pathlib import Path
 
 from PIL import Image
 
-from .label_parser import LabelDraft, normalize_type, parse_document_text
+from .label_parser import (
+    LabelDraft,
+    _product_from_piece,
+    normalize_type,
+    parse_document_text,
+)
 from .ocr_service import (
     _orange_label_crop,
     _prepare_paddle_label,
@@ -105,6 +110,27 @@ class VisionAnalysis:
         path.write_text(
             json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
+        )
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "VisionAnalysis":
+        return cls(
+            source_path=str(payload["source_path"]),
+            label_crop_path=str(payload.get("label_crop_path") or ""),
+            fields={
+                name: FieldDecision(
+                    **{
+                        **value,
+                        "candidates": [
+                            FieldCandidate(**candidate)
+                            for candidate in value.get("candidates", [])
+                        ],
+                    }
+                )
+                for name, value in payload["fields"].items()
+            },
+            readings=[VisionReading(**reading) for reading in payload.get("readings", [])],
+            product_type=str(payload.get("product_type") or ""),
         )
 
 
@@ -391,6 +417,68 @@ def analyze_image(image_path: Path, output_dir: Path) -> VisionAnalysis:
         readings=readings,
         product_type=product_type,
     )
+
+
+def _evidence_group(source_path: str) -> str:
+    stem = Path(source_path).stem
+    match = re.match(r"(.+?)_[0-9a-f]{12}_foto_\d+$", stem, re.IGNORECASE)
+    return match.group(1) if match else stem
+
+
+def apply_group_context(analyses: list[VisionAnalysis]) -> None:
+    """Use safe message-level context without copying piece measurements."""
+    grouped: dict[str, list[VisionAnalysis]] = {}
+    for analysis in analyses:
+        grouped.setdefault(_evidence_group(analysis.source_path), []).append(analysis)
+    for group in grouped.values():
+        confirmed_works = [
+            str(analysis.fields["work"].value)
+            for analysis in group
+            if analysis.fields["work"].status == "CONFIRMADO_AUTOMATICAMENTE"
+            and analysis.fields["work"].value
+        ]
+        unique_works = set(confirmed_works)
+        if len(confirmed_works) >= 2 and len(unique_works) == 1:
+            agreed_work = confirmed_works[0]
+            for analysis in group:
+                decision = analysis.fields["work"]
+                if decision.status != "CONFIRMADO_AUTOMATICAMENTE":
+                    decision.value = agreed_work
+                    decision.confidence = 0.90
+                    decision.status = "CONFIRMADO_AUTOMATICAMENTE"
+                    decision.reason = (
+                        f"{len(confirmed_works)} fotos do mesmo álbum concordaram com a obra."
+                    )
+        for analysis in group:
+            product = analysis.fields["product"]
+            piece = analysis.fields["piece"]
+            if (
+                product.status != "CONFIRMADO_AUTOMATICAMENTE"
+                and piece.status == "CONFIRMADO_AUTOMATICAMENTE"
+                and piece.value
+            ):
+                inferred = _product_from_piece(str(piece.value))
+                if inferred:
+                    product.value = inferred
+                    product.confidence = piece.confidence
+                    product.status = "CONFIRMADO_AUTOMATICAMENTE"
+                    product.reason = (
+                        f"Produto determinado pela família comprovada da peça {piece.value}."
+                    )
+            product_value = analysis.fields["product"].value or ""
+            length_value = analysis.fields["length"].value or ""
+            parsed_length = None
+            if length_value:
+                try:
+                    parsed_length = float(
+                        str(length_value).replace(".", "").replace(",", ".")
+                    )
+                except ValueError:
+                    pass
+            analysis.product_type = (
+                normalize_type("", str(product_value), parsed_length)
+                if product_value else ""
+            )
 
 
 def evaluate_against_reference(

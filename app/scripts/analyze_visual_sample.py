@@ -11,7 +11,11 @@ APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from wl_fechamento.vision_service import analyze_image  # noqa: E402
+from wl_fechamento.vision_service import (  # noqa: E402
+    VisionAnalysis,
+    analyze_image,
+    apply_group_context,
+)
 
 
 def latest_review_images() -> list[Path]:
@@ -48,21 +52,37 @@ def main() -> None:
     if not images:
         raise SystemExit("Nenhuma foto de revisão foi encontrada.")
     args.output.mkdir(parents=True, exist_ok=True)
-    summaries = []
+    processed = []
     for index, image_path in enumerate(images, start=1):
-        analysis = analyze_image(image_path, args.output / "evidencias")
         result_path = args.output / f"analise_{index:03d}.json"
+        reused = False
+        if result_path.exists():
+            try:
+                previous = json.loads(result_path.read_text(encoding="utf-8"))
+                reused = str(previous.get("source_path") or "") == str(image_path)
+            except (OSError, json.JSONDecodeError):
+                reused = False
+        if reused:
+            analysis = VisionAnalysis.from_dict(previous)
+        else:
+            analysis = analyze_image(image_path, args.output / "evidencias")
+        processed.append((image_path, result_path, analysis, reused))
+    apply_group_context([item[2] for item in processed])
+    summaries = []
+    for image_path, result_path, analysis, reused in processed:
         analysis.save(result_path)
-        summaries.append({
+        summary = {
             "foto": str(image_path),
             "resultado": str(result_path),
+            "reutilizado": reused,
             "campos_pendentes": analysis.pending_fields,
             "campos_confirmados": [
                 name for name, field in analysis.fields.items()
                 if field.status == "CONFIRMADO_AUTOMATICAMENTE"
             ],
-        })
-        print(json.dumps(summaries[-1], ensure_ascii=False), flush=True)
+        }
+        summaries.append(summary)
+        print(json.dumps(summary, ensure_ascii=False), flush=True)
     (args.output / "resumo.json").write_text(
         json.dumps(summaries, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -71,4 +91,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

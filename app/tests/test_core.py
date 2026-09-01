@@ -159,6 +159,19 @@ class OcrCropTests(unittest.TestCase):
         self.assertGreater(crop.width, 450)
         self.assertGreater(crop.height, 250)
 
+    def test_red_handwriting_is_not_joined_to_orange_label(self) -> None:
+        image = Image.new("RGB", (800, 900), "#d8d8d8")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((120, 90, 560, 340), outline=(238, 115, 24), width=18)
+        draw.line((160, 650, 650, 500), fill=(185, 36, 30), width=24)
+
+        crop = _orange_label_crop(image)
+
+        self.assertIsNotNone(crop)
+        self.assertLess(crop.height, 450)
+        self.assertGreater(crop.width, 450)
+        self.assertGreater(crop.height, 250)
+
     def test_extended_example_uses_last_two_numbers(self) -> None:
         entry = parse_stake_text("16x16x8+100")
         self.assertEqual(entry.piece, "16")

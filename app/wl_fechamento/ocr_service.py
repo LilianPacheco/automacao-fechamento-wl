@@ -90,6 +90,11 @@ def _orange_mask(pixels: np.ndarray) -> np.ndarray:
         & (green < 190)
         & (blue < 125)
         & (red_green > 45)
+        # The concrete pieces often contain large red handwritten codes.
+        # Orange ink keeps substantially more green than blue; red marker
+        # does not. Without this separation the crop could join the printed
+        # orange frame to the handwriting several hundred pixels below it.
+        & (green_blue > 20)
     )
     if int(strict.sum()) >= 500:
         return strict

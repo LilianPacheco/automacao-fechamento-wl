@@ -5,6 +5,7 @@ import unittest
 from wl_fechamento.vision_service import (
     VisionAnalysis,
     VisionReading,
+    apply_group_context,
     decide_fields,
     evaluate_against_reference,
 )
@@ -125,6 +126,42 @@ class VisionDecisionTests(unittest.TestCase):
         self.assertEqual(result["corretos"], 6)
         self.assertEqual(result["divergentes"], 0)
         self.assertEqual(result["precisao_automatica_percentual"], 100.0)
+
+    def test_group_context_fills_only_safe_shared_fields(self) -> None:
+        complete = VisionAnalysis(
+            source_path="album-abc_aaaaaaaaaaaa_foto_1.jpg",
+            label_crop_path="one.png",
+            fields=decide_fields([
+                VisionReading("a", COMPLETE_LABEL, 0.9),
+                VisionReading("b", COMPLETE_LABEL, 0.9),
+            ]),
+            readings=[],
+        )
+        second = VisionAnalysis(
+            source_path="album-abc_bbbbbbbbbbbb_foto_2.jpg",
+            label_crop_path="two.png",
+            fields=decide_fields([
+                VisionReading("a", COMPLETE_LABEL.replace("PH-16", "PH-17"), 0.9),
+                VisionReading("b", COMPLETE_LABEL.replace("PH-16", "PH-17"), 0.9),
+            ]),
+            readings=[],
+        )
+        partial = VisionAnalysis(
+            source_path="album-abc_cccccccccccc_foto_3.jpg",
+            label_crop_path="three.png",
+            fields=decide_fields([
+                VisionReading("a", "Peca: PP-10", 0.9),
+                VisionReading("b", "Peca: PP-10", 0.9),
+            ]),
+            readings=[],
+        )
+
+        apply_group_context([complete, second, partial])
+
+        self.assertEqual(partial.fields["work"].value, "TESTE GALPAO")
+        self.assertEqual(partial.fields["product"].value, "PILAR")
+        self.assertEqual(partial.fields["piece"].value, "PP-10")
+        self.assertIsNone(partial.fields["section"].value)
 
 
 if __name__ == "__main__":
