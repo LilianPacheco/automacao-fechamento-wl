@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import html
 import json
 from pathlib import Path
@@ -7,13 +8,36 @@ from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 CAPTURES = Path.home() / "AppData" / "Roaming" / "WL Fechamento" / "Capturas"
-source = max(CAPTURES.glob("*/revisao_temporaria.json"), key=lambda p: p.stat().st_mtime)
+parser = argparse.ArgumentParser()
+parser.add_argument("--source", type=Path)
+parser.add_argument("--period-key", default="revisao-manual")
+parser.add_argument("--output-dir", type=Path)
+args = parser.parse_args()
+
+if args.source is not None:
+    source = args.source.resolve()
+else:
+    candidates = list(CAPTURES.glob("*/revisao_temporaria.json"))
+    if not candidates:
+        parser.error("Nenhum cache de revisão foi localizado.")
+    source = max(candidates, key=lambda p: p.stat().st_mtime)
+if not source.exists():
+    parser.error(f"O cache informado não existe: {source}")
+
 loaded = json.loads(source.read_text(encoding="utf-8"))
 rows = [item for values in loaded.values() for item in values if isinstance(item, dict)] if isinstance(loaded, dict) else loaded
 prelog_dir = Path(r"C:\Users\lilia\Downloads\FECHAMENTOS PRELOG")
-out_dir = prelog_dir / "Revisão Fechamento WL"
-if not prelog_dir.exists():
-    out_dir = APP_ROOT / "runtime_captures" / "revisao_live_2026-08"
+safe_period_key = "".join(
+    character for character in args.period_key
+    if character.isalnum() or character in "-_"
+) or "revisao-manual"
+out_dir = (
+    args.output_dir.resolve()
+    if args.output_dir is not None
+    else prelog_dir / "Revisão Fechamento WL" / safe_period_key
+)
+if args.output_dir is None and not prelog_dir.exists():
+    out_dir = APP_ROOT / "runtime_captures" / safe_period_key
 try:
     out_dir.mkdir(parents=True, exist_ok=True)
     probe = out_dir / ".wl_write_probe"
@@ -23,7 +47,7 @@ except PermissionError:
     # FECHAMENTOS PRELOG may be protected by Windows/OneDrive. Keep the
     # review in the application's writable capture folder instead of falling
     # back to the legacy table window.
-    out_dir = APP_ROOT / "runtime_captures" / "revisao_live_2026-08"
+    out_dir = APP_ROOT / "runtime_captures" / safe_period_key
     out_dir.mkdir(parents=True, exist_ok=True)
 
 options = ["BLOCO", "ESTACA", "ESCADA", "MURO", "PAINEL", "PILAR", "VIGA", "LAJE", "VIGA 15,56m ATÉ 25m", "VIGA 10,1m ATÉ 15,55m", "VIGA 9m ATÉ 10m", "VIGA 6,1 ATÉ 8,9m", "VIGA ATÉ 6m", "LAJE ALVEOLAR", "METRO CÚBICO", "VIGA TERÇA"]
@@ -44,7 +68,7 @@ def status(row: dict) -> str:
         required = ("message_date", "work", "product", "piece", "section", "length", "unit_volume")
     return "CONFIRMADO" if all(str(row.get(key) or "").strip() for key in required) else "PENDENTE"
 
-parts = ["<!doctype html><meta charset='utf-8'><title>Revisão temporária do fechamento WL</title>", """<style>body{font-family:Arial;background:#f2f5f7;margin:20px;color:#263746}header{position:sticky;top:0;z-index:5;background:#f2f5f7;padding:8px 0 14px;border-bottom:1px solid #ccd6dc}h1{margin:4px 0 8px}.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.filter{border:1px solid #3178a8;border-radius:5px;background:#fff;padding:8px 13px;cursor:pointer}.filter.active{background:#1769aa;color:#fff}.count{font-weight:bold;margin-left:8px}section{background:#fff;padding:14px;margin:12px 0;border-left:5px solid #d18b00}section.ok{border-left-color:#3b9148}section.no{border-left-color:#b33a3a}.grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px}label{font-size:12px;color:#526574}input,select{display:block;width:100%;box-sizing:border-box;padding:7px;margin-top:3px}.warn{color:#9b5c00;font-size:13px}a{color:#1769aa}.hidden{display:none!important}@media(max-width:800px){.grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}</style>""", f"<header><h1>Revisão temporária do fechamento WL</h1><p>Fotos analisadas: {len(rows)} · Campos incertos ficam pendentes.</p><div class='filters'><span>Exibir:</span><button class='filter active' data-filter='TODOS'>Todos</button><button class='filter' data-filter='PENDENTE'>Pendente</button><button class='filter' data-filter='CONFIRMADO'>Confirmado</button><button class='filter' data-filter='APROVADO'>Aprovado</button><button class='filter' data-filter='REJEITADO'>Rejeitado</button><span class='count' id='count'></span></div></header>"]
+parts = ["<!doctype html><meta charset='utf-8'><title>Revisão temporária do fechamento WL</title>", """<style>body{font-family:Arial;background:#f2f5f7;margin:20px;color:#263746}header{position:sticky;top:0;z-index:5;background:#f2f5f7;padding:8px 0 14px;border-bottom:1px solid #ccd6dc}h1{margin:4px 0 8px}.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.filter{border:1px solid #3178a8;border-radius:5px;background:#fff;padding:8px 13px;cursor:pointer}.filter.active{background:#1769aa;color:#fff}.count{font-weight:bold;margin-left:8px}section{background:#fff;padding:14px;margin:12px 0;border-left:5px solid #d18b00}section.ok{border-left-color:#3b9148}section.no{border-left-color:#b33a3a}.grid{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px}label{font-size:12px;color:#526574}input,select{display:block;width:100%;box-sizing:border-box;padding:7px;margin-top:3px}.warn{color:#9b5c00;font-size:13px}a{color:#1769aa}.hidden{display:none!important}@media(max-width:800px){.grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}</style>""", f"<header><h1>Revisão temporária do fechamento WL</h1><p><strong>Período: {html.escape(safe_period_key)}</strong> · Fonte: {html.escape(source.parent.name)}</p><p>Fotos analisadas: {len(rows)} · Campos incertos ficam pendentes.</p><div class='filters'><span>Exibir:</span><button class='filter active' data-filter='TODOS'>Todos</button><button class='filter' data-filter='PENDENTE'>Pendente</button><button class='filter' data-filter='CONFIRMADO'>Confirmado</button><button class='filter' data-filter='APROVADO'>Aprovado</button><button class='filter' data-filter='REJEITADO'>Rejeitado</button><span class='count' id='count'></span></div></header>"]
 for i, row in enumerate(rows):
     current = status(row)
     link = f"<a href='{html.escape(Path(str(row.get('source_path'))).as_uri())}' target='_blank'>Abrir foto original</a>" if row.get("source_path") else "sem foto"

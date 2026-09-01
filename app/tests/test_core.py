@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import json
 import base64
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -17,7 +17,11 @@ from wl_fechamento.ocr_service import _orange_label_crop, score_ocr_text
 from wl_fechamento.chrome_bridge import BRIDGE_PORT, ChromeBridge, load_saved_whatsapp_session
 from wl_fechamento.models import AppConfiguration, PeriodSelection
 from wl_fechamento.stake_parser import parse_stake_text
-from wl_fechamento.whatsapp_service import WhatsAppProbeResult, _parse_probe_output
+from wl_fechamento.whatsapp_service import (
+    WhatsAppProbeResult,
+    _parse_probe_output,
+    restrict_result_to_period,
+)
 from wl_fechamento.label_parser import normalize_type, parse_document_text, parse_label_text
 from wl_fechamento.grouping_service import ConsolidatedRow, group_approved_drafts
 from wl_fechamento.review_service import _apply_message_consensus, _sanitize_duplicate_measurements
@@ -36,6 +40,41 @@ class PeriodTests(unittest.TestCase):
         period = PeriodSelection(2026, 7, 1)
         self.assertEqual(period.start_date.isoformat(), "2026-07-01")
         self.assertEqual(period.end_date.isoformat(), "2026-07-15")
+
+    def test_review_key_is_unique_per_fortnight(self) -> None:
+        self.assertEqual(
+            PeriodSelection(2026, 8, 2).review_key,
+            "2026-08_2a-quinzena",
+        )
+
+    def test_probe_result_discards_evidence_from_other_fortnight(self) -> None:
+        result = WhatsAppProbeResult.from_dict({
+            "connected": True,
+            "group_found": True,
+            "start_date_found": True,
+            "start_date": "02/08/2026",
+            "evidences": [
+                {"message_id": "old", "message_date": "02/08/2026", "image_count": 1},
+                {"message_id": "current", "message_date": "18/08/2026", "image_count": 1},
+            ],
+            "captured_attachments": [
+                {"message_id": "old", "filename": "old.jpg", "path": "old.jpg", "size": 1, "sha256": "a"},
+                {"message_id": "current", "filename": "current.jpg", "path": "current.jpg", "size": 1, "sha256": "b"},
+            ],
+        })
+
+        filtered = restrict_result_to_period(
+            result,
+            date(2026, 8, 16),
+            date(2026, 8, 31),
+        )
+
+        self.assertEqual([item.message_id for item in filtered.evidences], ["current"])
+        self.assertEqual(
+            [item.message_id for item in filtered.captured_attachments],
+            ["current"],
+        )
+        self.assertEqual(filtered.start_date, "16/08/2026")
 
 
 class StakeParserTests(unittest.TestCase):

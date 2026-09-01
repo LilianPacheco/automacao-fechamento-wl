@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import dataclass, field
-from datetime import date
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -153,6 +153,65 @@ class WhatsAppProbeResult:
             evidence_truncated=bool(data.get("evidence_truncated")),
             message=str(data.get("message", "")),
         )
+
+
+def restrict_result_to_period(
+    result: WhatsAppProbeResult,
+    start_date: date,
+    end_date: date,
+) -> WhatsAppProbeResult:
+    """Keep only evidence and attachments proven to belong to the selection.
+
+    The browser reader is expected to filter the period already.  This second
+    boundary prevents a stale or mixed browser payload from ever reaching OCR.
+    """
+    valid_evidences: list[WhatsAppEvidence] = []
+    for evidence in result.evidences:
+        try:
+            evidence_date = datetime.strptime(evidence.message_date, "%d/%m/%Y").date()
+        except ValueError:
+            continue
+        if start_date <= evidence_date <= end_date:
+            valid_evidences.append(evidence)
+
+    valid_ids = [evidence.message_id for evidence in valid_evidences]
+
+    def belongs_to_valid_evidence(message_id: str) -> bool:
+        return any(
+            message_id == evidence_id
+            or message_id.startswith(evidence_id)
+            or evidence_id.startswith(message_id)
+            for evidence_id in valid_ids
+        )
+
+    valid_attachments = [
+        attachment
+        for attachment in result.captured_attachments
+        if belongs_to_valid_evidence(attachment.message_id)
+    ]
+    valid_album_ids = {attachment.message_id for attachment in valid_attachments}
+    valid_albums = [
+        album for album in result.incomplete_albums
+        if album.message_id in valid_album_ids
+    ]
+    stake_messages = [
+        evidence.stake_text for evidence in valid_evidences if evidence.stake_text
+    ]
+    excluded = len(result.evidences) - len(valid_evidences)
+    message = result.message
+    if excluded:
+        message = (
+            f"{message} " if message else ""
+        ) + f"{excluded} evidência(s) fora do período foram descartadas."
+    return replace(
+        result,
+        start_date=start_date.strftime("%d/%m/%Y"),
+        evidences=valid_evidences,
+        captured_attachments=valid_attachments,
+        incomplete_albums=valid_albums,
+        stake_messages=stake_messages,
+        message=message,
+    )
 
 
 def _parse_probe_output(output: str) -> WhatsAppProbeResult:

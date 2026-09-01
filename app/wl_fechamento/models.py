@@ -64,6 +64,11 @@ class PeriodSelection:
             f"{self.end_date.strftime('%d/%m/%Y')}"
         )
 
+    @property
+    def review_key(self) -> str:
+        """Stable identifier used to isolate captures and reviews by period."""
+        return f"{self.year:04d}-{self.month:02d}_{self.fortnight}a-quinzena"
+
 
 @dataclass(frozen=True)
 class StakeTextEntry:
