@@ -394,13 +394,32 @@ class FechamentoApp(tk.Tk):
         if result.evidence_truncated:
             evidence_lines.append("  ⚠ O inventário atingiu o limite de segurança.")
 
+        first_evidence_date = ""
+        if result.evidences:
+            first_evidence_date = min(
+                result.evidences,
+                key=lambda item: datetime.strptime(item.message_date, "%d/%m/%Y"),
+            ).message_date
+        configured_start = period.start_date.strftime("%d/%m/%Y")
+        if (
+            result.start_date_found
+            and first_evidence_date
+            and first_evidence_date != configured_start
+        ):
+            start_check = (
+                f"• Início {configured_start}: sem movimento; primeira evidência "
+                f"em {first_evidence_date} reconhecida"
+            )
+        else:
+            start_check = (
+                f"• Data inicial {configured_start}: "
+                f"{'encontrada' if result.start_date_found else 'não encontrada'}"
+            )
+
         details = [
             f"• Conexão: {'OK' if result.connected else 'não'}",
             f"• Grupo correto: {'OK' if result.group_found else 'não encontrado'}",
-            (
-                f"• Data inicial {result.start_date}: "
-                f"{'encontrada' if result.start_date_found else 'não encontrada'}"
-            ),
+            start_check,
             f"• Etapas de carregamento: {result.load_attempts}",
             f"• Esperas pela sincronização: {result.sync_waits}",
             (

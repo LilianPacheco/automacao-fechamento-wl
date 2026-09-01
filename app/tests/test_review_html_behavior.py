@@ -7,6 +7,41 @@ import unittest
 
 
 class ReviewHtmlBehaviorTests(unittest.TestCase):
+    def test_whatsapp_caption_quantity_parser(self) -> None:
+        parser_path = (
+            Path(__file__).resolve().parents[1]
+            / "chrome_extension"
+            / "quantity.js"
+        )
+        program = (
+            "const {parseQuantityHint}=require(process.argv[1]);"
+            "console.log(JSON.stringify(["
+            "parseQuantityHint('Wilian Socio\\n21\\n15:52'),"
+            "parseQuantityHint('Wilian Socio\\n15:52'),"
+            "parseQuantityHint('12,5')]))"
+        )
+        completed = subprocess.run(
+            ["node", "-e", program, str(parser_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+
+        self.assertEqual(json.loads(completed.stdout), [21, None, 12.5])
+
+    def test_manifest_loads_quantity_parser_before_reader(self) -> None:
+        manifest_path = (
+            Path(__file__).resolve().parents[1]
+            / "chrome_extension"
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["content_scripts"][0]["js"],
+            ["quantity.js", "content_v185.js"],
+        )
+
     def test_only_situation_select_changes_card_status(self) -> None:
         script = (
             Path(__file__).resolve().parents[1]

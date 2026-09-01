@@ -24,7 +24,11 @@ from wl_fechamento.whatsapp_service import (
 )
 from wl_fechamento.label_parser import normalize_type, parse_document_text, parse_label_text
 from wl_fechamento.grouping_service import ConsolidatedRow, group_approved_drafts
-from wl_fechamento.review_service import _apply_message_consensus, _sanitize_duplicate_measurements
+from wl_fechamento.review_service import (
+    _apply_message_consensus,
+    _apply_message_quantity,
+    _sanitize_duplicate_measurements,
+)
 from wl_fechamento.workbook_writer_service import rows_to_payload
 from wl_fechamento.workbook_service import create_backup, validate_workbook
 
@@ -51,11 +55,11 @@ class PeriodTests(unittest.TestCase):
         result = WhatsAppProbeResult.from_dict({
             "connected": True,
             "group_found": True,
-            "start_date_found": True,
+            "start_date_found": False,
             "start_date": "02/08/2026",
             "evidences": [
                 {"message_id": "old", "message_date": "02/08/2026", "image_count": 1},
-                {"message_id": "current", "message_date": "18/08/2026", "image_count": 1},
+                {"message_id": "current", "message_date": "18/08/2026", "image_count": 1, "quantity_hint": 21},
             ],
             "captured_attachments": [
                 {"message_id": "old", "filename": "old.jpg", "path": "old.jpg", "size": 1, "sha256": "a"},
@@ -75,6 +79,33 @@ class PeriodTests(unittest.TestCase):
             ["current"],
         )
         self.assertEqual(filtered.start_date, "16/08/2026")
+        self.assertTrue(filtered.start_date_found)
+        self.assertEqual(filtered.evidences[0].quantity_hint, 21)
+        self.assertIn("primeira evidência reconhecida em 18/08/2026", filtered.message)
+
+    def test_photo_caption_quantity_replaces_default_piece_count(self) -> None:
+        result = WhatsAppProbeResult.from_dict({
+            "connected": True,
+            "group_found": True,
+            "start_date_found": True,
+            "start_date": "16/08/2026",
+            "evidences": [{
+                "message_id": "photo-21",
+                "message_date": "20/08/2026",
+                "image_count": 1,
+                "quantity_hint": 21,
+            }],
+        })
+        draft = parse_label_text(
+            "Obra: TESTE Produto: PILAR Secao: 40X40 "
+            "Comprimento: 8,000 Peca: PH-1 Vol. (m3): 1,250",
+            message_id="photo-21",
+            message_date="20/08/2026",
+        )
+
+        _apply_message_quantity([draft], result, "photo-21")
+
+        self.assertEqual(draft.quantity, 21)
 
 
 class StakeParserTests(unittest.TestCase):

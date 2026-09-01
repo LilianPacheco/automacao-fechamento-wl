@@ -31,6 +31,7 @@ class WhatsAppEvidence:
     image_count: int = 0
     pdf_names: list[str] = field(default_factory=list)
     stake_text: str = ""
+    quantity_hint: int | float | None = None
     has_ok: bool = False
 
     @property
@@ -52,6 +53,17 @@ class WhatsAppEvidence:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WhatsAppEvidence":
+        quantity_hint: int | float | None = None
+        try:
+            parsed_quantity = float(data.get("quantity_hint"))
+            if parsed_quantity > 0:
+                quantity_hint = (
+                    int(parsed_quantity)
+                    if parsed_quantity.is_integer()
+                    else round(parsed_quantity, 3)
+                )
+        except (TypeError, ValueError):
+            pass
         return cls(
             message_id=str(data.get("message_id", "")),
             message_date=str(data.get("message_date", "")),
@@ -60,6 +72,7 @@ class WhatsAppEvidence:
             image_count=max(0, int(data.get("image_count", 0))),
             pdf_names=[str(item) for item in data.get("pdf_names", [])],
             stake_text=str(data.get("stake_text", "")),
+            quantity_hint=quantity_hint,
             has_ok=bool(data.get("has_ok")),
         )
 
@@ -198,13 +211,28 @@ def restrict_result_to_period(
         evidence.stake_text for evidence in valid_evidences if evidence.stake_text
     ]
     excluded = len(result.evidences) - len(valid_evidences)
+    period_found = result.start_date_found or bool(valid_evidences)
+    first_evidence_date = ""
+    if valid_evidences:
+        first_evidence_date = min(
+            valid_evidences,
+            key=lambda item: datetime.strptime(item.message_date, "%d/%m/%Y"),
+        ).message_date
     message = result.message
     if excluded:
         message = (
             f"{message} " if message else ""
         ) + f"{excluded} evidência(s) fora do período foram descartadas."
+    if period_found and first_evidence_date:
+        configured_start = start_date.strftime("%d/%m/%Y")
+        if first_evidence_date != configured_start:
+            message = (
+                f"Sem movimento em {configured_start}; primeira evidência "
+                f"reconhecida em {first_evidence_date}."
+            )
     return replace(
         result,
+        start_date_found=period_found,
         start_date=start_date.strftime("%d/%m/%Y"),
         evidences=valid_evidences,
         captured_attachments=valid_attachments,

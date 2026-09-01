@@ -27,6 +27,18 @@ function wlNormalize(value) {
     .toLowerCase();
 }
 
+function wlMessageCaptionText(bubble, fallbackText = "") {
+  const selectors = [
+    ".selectable-text",
+    '[data-testid="conversation-text"]',
+    '[data-testid="msg-text"]',
+  ];
+  const values = Array.from(bubble?.querySelectorAll?.(selectors.join(",")) || [])
+    .map((element) => (element.innerText || element.textContent || "").trim())
+    .filter(Boolean);
+  return values.length ? values.join("\n") : fallbackText;
+}
+
 function wlGroupMatches(value, groupName) {
   const candidate = wlNormalize(value);
   const expected = wlNormalize(groupName);
@@ -473,6 +485,9 @@ function wlCollectInventoryFromRows(panel, config, knownIds, dateState = null) {
     ));
     const stakeMatch = text.match(/\b\d+(?:\s*[x\u00d7]\s*\d+)+(?:\s*[+=]\s*\d+)\b/i);
     const stakeText = stakeMatch ? stakeMatch[0] : "";
+    const quantityHint = imageCount && !stakeText
+      ? globalThis.wlQuantityHint?.(wlMessageCaptionText(element, text)) ?? null
+      : null;
     if (!imageCount && !pdfNames.length && !stakeText) continue;
 
     const timeMatch = text.match(/\b\d{1,2}:\d{2}\b/);
@@ -499,6 +514,7 @@ function wlCollectInventoryFromRows(panel, config, knownIds, dateState = null) {
       media_elements: mediaButtons,
       pdf_names: pdfNames,
       stake_text: stakeText,
+      quantity_hint: quantityHint,
       has_ok: accessible.includes("\u{1F197}"),
     });
   }
@@ -557,6 +573,9 @@ function wlCollectInventory(panel, config, options = {}) {
     ));
     const stakeMatch = text.match(/\b\d+(?:\s*[x\u00d7]\s*\d+)+(?:\s*[+=]\s*\d+)\b/i);
     const stakeText = stakeMatch ? stakeMatch[0] : "";
+    const quantityHint = imageCount && !stakeText
+      ? globalThis.wlQuantityHint?.(wlMessageCaptionText(bubble, text)) ?? null
+      : null;
     if (!imageCount && !pdfNames.length && !stakeText) continue;
 
     const idElement = metadata.closest("[data-id]") || bubble.querySelector("[data-id]");
@@ -576,6 +595,7 @@ function wlCollectInventory(panel, config, options = {}) {
       media_elements: mediaButtons,
       pdf_names: pdfNames,
       stake_text: stakeText,
+      quantity_hint: quantityHint,
       has_ok: accessible.includes("\u{1F197}"),
     });
   }
@@ -1605,6 +1625,7 @@ async function wlAnalyze(config) {
   // A quinzena can begin with a day without messages. Use the first active
   // date found inside the interval instead of requiring the exact start day.
   startDateFound = startDateFound || Boolean(evidence.start_date_observed);
+  const effectiveStart = evidence.first_period_date || config.start_label;
   wlPost({
     ...base,
     final: true,
@@ -1616,7 +1637,9 @@ async function wlAnalyze(config) {
     ...evidence,
     attachment_errors: wlAttachmentErrors.slice(-20),
     message: startDateFound
-      ? `Histórico comprovado até ${config.start_label}.`
+      ? (effectiveStart === config.start_label
+        ? `Histórico comprovado desde ${config.start_label}.`
+        : `Sem movimento em ${config.start_label}; primeira evidência reconhecida em ${effectiveStart}.`)
       : `A data inicial ainda não apareceu. Calendário: ${wlNavigationStage}.`,
   });
 }

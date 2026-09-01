@@ -338,6 +338,35 @@ def _message_date(result: WhatsAppProbeResult, message_id: str) -> str:
     return ""
 
 
+def _message_quantity(
+    result: WhatsAppProbeResult,
+    message_id: str,
+) -> int | float | None:
+    for evidence in result.evidences:
+        if (
+            message_id == evidence.message_id
+            or message_id.startswith(evidence.message_id)
+            or evidence.message_id.startswith(message_id)
+        ):
+            return evidence.quantity_hint
+    return None
+
+
+def _apply_message_quantity(
+    drafts: list[LabelDraft],
+    result: WhatsAppProbeResult,
+    message_id: str,
+) -> None:
+    quantity = _message_quantity(result, message_id)
+    if quantity is None:
+        return
+    for draft in drafts:
+        # Structured documents such as delivery notes calculate their own
+        # totals. A WhatsApp caption replaces only the default one-piece value.
+        if draft.quantity == 1:
+            draft.quantity = quantity
+
+
 def build_review_drafts(
     result: WhatsAppProbeResult,
     progress: ProgressCallback | None = None,
@@ -408,6 +437,7 @@ def build_review_drafts(
                     ))
                 else:
                     reparsed.append(LabelDraft(**item))
+            _apply_message_quantity(reparsed, result, attachment.message_id)
             drafts.extend(reparsed)
             cache[cache_key] = [asdict(item) for item in reparsed]
             try:
@@ -423,6 +453,11 @@ def build_review_drafts(
                     message_id=attachment.message_id,
                     message_date=_message_date(result, attachment.message_id),
                     source_path=attachment.path,
+                )
+                _apply_message_quantity(
+                    reading_drafts,
+                    result,
+                    attachment.message_id,
                 )
                 for draft in reading_drafts:
                     if reading.score < 35:
