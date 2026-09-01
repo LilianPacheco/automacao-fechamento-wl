@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+from wl_fechamento.review_service import (
+    _vision_analysis_to_draft,
+    build_advanced_review_drafts,
+)
 from wl_fechamento.vision_service import (
     VisionAnalysis,
     VisionReading,
     apply_group_context,
     decide_fields,
     evaluate_against_reference,
+)
+from wl_fechamento.whatsapp_service import (
+    WhatsAppAttachment,
+    WhatsAppEvidence,
+    WhatsAppProbeResult,
 )
 
 
@@ -162,6 +175,84 @@ class VisionDecisionTests(unittest.TestCase):
         self.assertEqual(partial.fields["product"].value, "PILAR")
         self.assertEqual(partial.fields["piece"].value, "PP-10")
         self.assertIsNone(partial.fields["section"].value)
+
+    def test_pending_field_stays_pending_when_candidate_is_visible(self) -> None:
+        readings = [VisionReading("motor_a", COMPLETE_LABEL, 0.95)]
+        analysis = VisionAnalysis(
+            source_path="foto.jpg",
+            label_crop_path="etiqueta.png",
+            fields=decide_fields(readings),
+            readings=readings,
+            product_type="PILAR",
+        )
+        result = WhatsAppProbeResult(
+            connected=True,
+            group_found=True,
+            start_date_found=True,
+            start_date="02/08/2026",
+            evidences=[WhatsAppEvidence(
+                message_id="msg-1",
+                message_date="02/08/2026",
+            )],
+        )
+
+        draft = _vision_analysis_to_draft(analysis, result, "msg-1")
+
+        self.assertEqual(draft.piece, "PH-16")
+        self.assertEqual(draft.status, "CONFIRMAR")
+        self.assertIn("Confirmar peça", draft.warnings)
+
+    def test_advanced_flow_writes_the_cache_consumed_by_html_review(self) -> None:
+        readings = [
+            VisionReading("motor_a", COMPLETE_LABEL, 0.95),
+            VisionReading("motor_b", COMPLETE_LABEL, 0.94),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "album-x_aaaaaaaaaaaa_foto_1.jpg"
+            image_path.write_bytes(b"test-image")
+            analysis = VisionAnalysis(
+                source_path=str(image_path),
+                label_crop_path="etiqueta.png",
+                fields=decide_fields(readings),
+                readings=readings,
+                product_type="PILAR",
+            )
+            result = WhatsAppProbeResult(
+                connected=True,
+                group_found=True,
+                start_date_found=True,
+                start_date="02/08/2026",
+                evidences=[WhatsAppEvidence(
+                    message_id="msg-1",
+                    message_date="02/08/2026",
+                )],
+                captured_attachments=[WhatsAppAttachment(
+                    message_id="msg-1",
+                    filename=image_path.name,
+                    mime_type="image/jpeg",
+                    path=str(image_path),
+                    size=10,
+                    sha256="abc123",
+                )],
+            )
+
+            with patch(
+                "wl_fechamento.review_service.analyze_image",
+                return_value=analysis,
+            ):
+                drafts = build_advanced_review_drafts(result)
+
+            review_cache = Path(temporary) / "revisao_temporaria.json"
+            payload = json.loads(review_cache.read_text(encoding="utf-8"))
+            self.assertEqual(len(drafts), 1)
+            self.assertEqual(drafts[0].piece, "PH-16")
+            self.assertEqual(
+                payload["msg-1:abc123"][0]["status"],
+                "PRONTO PARA REVISÃO",
+            )
+            self.assertTrue(
+                (Path(temporary) / "analise_visual_v2" / "abc123.json").exists()
+            )
 
 
 if __name__ == "__main__":

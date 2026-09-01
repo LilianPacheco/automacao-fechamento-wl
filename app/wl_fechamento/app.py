@@ -14,7 +14,7 @@ from .chrome_bridge import probe_whatsapp_chrome
 from .models import MONTH_NAMES, MONTH_NUMBERS, AppConfiguration, PeriodSelection
 from .label_parser import LabelDraft
 from .grouping_service import ConsolidatedRow, group_approved_drafts
-from .review_service import build_review_drafts
+from .review_service import build_advanced_review_drafts
 from .workbook_writer_service import write_approved_rows
 from .stake_parser import parse_stake_text
 from .whatsapp_service import WhatsAppProbeResult, restrict_result_to_period
@@ -42,7 +42,7 @@ COLORS = {
 class FechamentoApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Automação do Fechamento WL")
+        self.title("Automação do Fechamento WL — Leitura Visual 2")
         self.geometry("1040x610+35+25")
         self.minsize(900, 550)
         self.configure(bg=COLORS["background"])
@@ -215,7 +215,7 @@ class FechamentoApp(tk.Tk):
         self.next_button.pack(fill="x", pady=(12, 0))
         self.review_button = ttk.Button(
             content,
-            text="Analisar fotos e abrir revisão temporária",
+            text="Analisar fotos com Leitura Visual 2",
             style="Primary.TButton",
             state="disabled",
             command=self._start_photo_review,
@@ -276,7 +276,7 @@ class FechamentoApp(tk.Tk):
             self.last_probe_period = None
             self.review_html_path = None
             self.review_period_key = None
-            self.review_button.configure(state="disabled", text="Analisar fotos e abrir revisão temporária")
+            self.review_button.configure(state="disabled", text="Analisar fotos com Leitura Visual 2")
             self.config_data = AppConfiguration(
                 workbook_path=str(result.path),
                 last_year=period.year,
@@ -309,7 +309,7 @@ class FechamentoApp(tk.Tk):
         self.last_probe_period = None
         self.review_html_path = None
         self.review_period_key = None
-        self.review_button.configure(state="disabled", text="Analisar fotos e abrir revisão temporária")
+        self.review_button.configure(state="disabled", text="Analisar fotos com Leitura Visual 2")
         self.next_button.configure(state="disabled")
         self.status_var.set("Conectando ao WhatsApp…")
         self._set_status("warning")
@@ -505,7 +505,7 @@ class FechamentoApp(tk.Tk):
             )
             return
         self.review_button.configure(state="disabled")
-        self.status_var.set("Lendo etiquetas para revisão…")
+        self.status_var.set("Leitura Visual 2: analisando etiquetas…")
         self._set_status("warning")
         worker = threading.Thread(
             target=self._run_photo_review,
@@ -526,8 +526,25 @@ class FechamentoApp(tk.Tk):
                 "• A leitura é local e não altera o WhatsApp nem a planilha.",
             ]))
 
-        drafts = build_review_drafts(result, progress)
+        try:
+            drafts = build_advanced_review_drafts(result, progress)
+        except Exception as exc:
+            error = str(exc)
+            self.after(0, lambda: self._show_photo_review_error(error))
+            return
         self.after(0, lambda: self._show_photo_review(drafts, result, period))
+
+    def _show_photo_review_error(self, error: str) -> None:
+        self.status_var.set("A leitura visual não foi concluída")
+        self._set_status("error")
+        self.review_button.configure(
+            state="normal", text="Tentar novamente com Leitura Visual 2"
+        )
+        self._set_details([
+            "A revisão temporária não foi substituída.",
+            f"Motivo: {error}",
+            "As fotos já analisadas continuam salvas para a próxima tentativa.",
+        ])
 
     def _show_photo_review(
         self,

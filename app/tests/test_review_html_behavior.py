@@ -118,6 +118,7 @@ class ReviewHtmlBehaviorTests(unittest.TestCase):
             html_path = Path(completed.stdout.strip().splitlines()[-1])
             page = html_path.read_text(encoding="utf-8")
             self.assertIn("2026-08_2a-quinzena", page)
+            self.assertIn("Leitura Visual 2", page)
             self.assertIn("18/08/2026", page)
             self.assertIn("PH-99", page)
 

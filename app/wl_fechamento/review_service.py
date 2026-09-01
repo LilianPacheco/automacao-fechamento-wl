@@ -10,6 +10,12 @@ from typing import Callable
 from .label_parser import LabelDraft, normalize_type, parse_document_text
 from .ocr_service import read_image_texts
 from .paddle_ocr_service import is_available as paddle_available
+from .vision_service import (
+    VisionAnalysis,
+    analyze_image,
+    apply_group_context,
+    decide_fields,
+)
 from .whatsapp_service import WhatsAppProbeResult
 
 
@@ -365,6 +371,157 @@ def _apply_message_quantity(
         # totals. A WhatsApp caption replaces only the default one-piece value.
         if draft.quantity == 1:
             draft.quantity = quantity
+
+
+def _vision_analysis_to_draft(
+    analysis: VisionAnalysis,
+    result: WhatsAppProbeResult,
+    message_id: str,
+) -> LabelDraft:
+    """Convert audited field decisions into the existing review format."""
+    values = {
+        name: decision.value
+        for name, decision in analysis.fields.items()
+    }
+    warnings = [
+        f"Confirmar {decision.label}"
+        for decision in analysis.fields.values()
+        if decision.status != "CONFIRMADO_AUTOMATICAMENTE"
+    ]
+    length = str(values.get("length") or "")
+    unit_volume = values.get("unit_volume")
+    try:
+        parsed_volume = float(unit_volume) if unit_volume not in (None, "") else None
+    except (TypeError, ValueError):
+        parsed_volume = None
+    draft = LabelDraft(
+        message_id=message_id,
+        message_date=_message_date(result, message_id),
+        source_path=analysis.source_path,
+        work=str(values.get("work") or ""),
+        product=str(values.get("product") or ""),
+        type_name=analysis.product_type,
+        piece=str(values.get("piece") or ""),
+        section=str(values.get("section") or ""),
+        length=length,
+        dimensions=" ".join(
+            item for item in (str(values.get("section") or ""), length) if item
+        ),
+        unit_volume=parsed_volume,
+        status="PRONTO PARA REVISÃO" if not warnings else "CONFIRMAR",
+        warnings=warnings,
+        ocr_text="\n\n".join(
+            reading.text for reading in analysis.readings
+            if not reading.field_hint and reading.text
+        ),
+    )
+    _apply_message_quantity([draft], result, message_id)
+    return draft
+
+
+def _structured_document_drafts(
+    analysis: VisionAnalysis,
+    result: WhatsAppProbeResult,
+    message_id: str,
+) -> list[LabelDraft]:
+    """Keep multi-row delivery notes that cannot be represented by one label."""
+    alternatives: list[list[LabelDraft]] = []
+    for reading in analysis.readings:
+        if reading.field_hint or not reading.text:
+            continue
+        parsed = parse_document_text(
+            reading.text,
+            message_id=message_id,
+            message_date=_message_date(result, message_id),
+            source_path=analysis.source_path,
+        )
+        if len(parsed) > 1:
+            _apply_message_quantity(parsed, result, message_id)
+            alternatives.append(parsed)
+    return max(alternatives, key=len) if alternatives else []
+
+
+def build_advanced_review_drafts(
+    result: WhatsAppProbeResult,
+    progress: ProgressCallback | None = None,
+) -> list[LabelDraft]:
+    """Run the auditable per-field visual pipeline used by the main app.
+
+    Every expensive photo result is cached separately and can be resumed.
+    The workbook and WhatsApp are never modified here.
+    """
+    images = [
+        attachment for attachment in result.captured_attachments
+        if attachment.mime_type.lower().startswith("image/")
+    ]
+    if not images:
+        return []
+    capture_dir = Path(images[0].path).parent
+    analysis_dir = capture_dir / "analise_visual_v2"
+    evidence_dir = analysis_dir / "evidencias"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    processed: list[tuple[object, VisionAnalysis, Path]] = []
+    failures: dict[str, str] = {}
+    total = len(images)
+    for index, attachment in enumerate(images, start=1):
+        if progress:
+            progress(index, total, attachment.filename)
+        cache_name = f"{attachment.sha256 or Path(attachment.path).stem}.json"
+        analysis_path = analysis_dir / cache_name
+        analysis: VisionAnalysis | None = None
+        if analysis_path.exists():
+            try:
+                payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+                if str(payload.get("source_path") or "") == attachment.path:
+                    analysis = VisionAnalysis.from_dict(payload)
+            except (OSError, json.JSONDecodeError, KeyError, TypeError):
+                analysis = None
+        if analysis is None:
+            try:
+                analysis = analyze_image(Path(attachment.path), evidence_dir)
+                analysis.save(analysis_path)
+            except Exception as exc:
+                # One damaged file must not discard the rest of the batch.
+                failures[attachment.path] = str(exc)
+                analysis = VisionAnalysis(
+                    source_path=attachment.path,
+                    label_crop_path="",
+                    fields=decide_fields([]),
+                    readings=[],
+                )
+        processed.append((attachment, analysis, analysis_path))
+
+    apply_group_context([analysis for _, analysis, _ in processed])
+    drafts: list[LabelDraft] = []
+    review_cache: dict[str, list[dict]] = {}
+    for attachment, analysis, analysis_path in processed:
+        if attachment.path not in failures:
+            analysis.save(analysis_path)
+        image_drafts = _structured_document_drafts(
+            analysis, result, attachment.message_id
+        )
+        if not image_drafts:
+            image_drafts = [
+                _vision_analysis_to_draft(analysis, result, attachment.message_id)
+            ]
+        if attachment.path in failures:
+            for draft in image_drafts:
+                draft.warnings.insert(
+                    0, f"Não foi possível ler a foto: {failures[attachment.path]}"
+                )
+                draft.status = "CONFIRMAR"
+        drafts.extend(image_drafts)
+        cache_key = f"{attachment.message_id}:{attachment.sha256}"
+        review_cache[cache_key] = [asdict(item) for item in image_drafts]
+
+    cache_path = capture_dir / "revisao_temporaria.json"
+    temporary = cache_path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(review_cache, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(cache_path)
+    return drafts
 
 
 def build_review_drafts(
