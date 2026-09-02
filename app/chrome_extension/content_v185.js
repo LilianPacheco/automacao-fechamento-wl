@@ -208,15 +208,45 @@ function wlStartTrustedSession(sessionId) {
   });
 }
 
-function wlCalendarGrid() {
-  return Array.from(document.querySelectorAll('[role="grid"]')).find((grid) => {
+function wlCalendarCells(root) {
+  return Array.from(
+    root?.querySelectorAll?.('[role="gridcell"], button, [role="button"]') || []
+  ).filter((element) => {
     const label = wlNormalize(
-      `${grid.getAttribute("aria-label") || ""} ${grid.getAttribute("title") || ""}`
+      `${element.getAttribute("aria-label") || ""} ` +
+      `${element.getAttribute("title") || ""} ` +
+      `${element.innerText || element.textContent || ""}`
     );
-    const cells = Array.from(grid.querySelectorAll('[role="gridcell"]'));
-    const text = wlNormalize(grid.innerText || grid.textContent || "");
-    return label.includes("escolher data") ||
-      (cells.length >= 28 && /\bde\s+[a-z]+\s+de\s+\d{4}\b/.test(text));
+    return /^(?:[1-9]|[12]\d|3[01])$/.test(label) ||
+      /\b(?:[1-9]|[12]\d|3[01])\s+de\s+[a-z]+\s+de\s+\d{4}\b/.test(label);
+  });
+}
+
+function wlCalendarGrid() {
+  // WhatsApp has used both an ARIA grid and a dialog made only of buttons.
+  // Identify the calendar by its set of day controls instead of depending on
+  // one transient role/test id.
+  const selector = [
+    '[role="grid"]',
+    '[role="dialog"]',
+    '[data-testid*="calendar" i]',
+    '[aria-label*="calendar" i]',
+    '[aria-label*="calend" i]',
+  ].join(', ');
+  const candidates = Array.from(document.querySelectorAll(selector));
+  return candidates.find((candidate) => {
+    const label = wlNormalize(
+      `${candidate.getAttribute("aria-label") || ""} ` +
+      `${candidate.getAttribute("title") || ""}`
+    );
+    const text = wlNormalize(candidate.innerText || candidate.textContent || "");
+    const cells = wlCalendarCells(candidate);
+    return cells.length >= 20 && (
+      label.includes("escolher data") ||
+      label.includes("calendar") ||
+      label.includes("calendario") ||
+      /\b(?:de\s+)?[a-z]+\s+de\s+\d{4}\b/.test(text)
+    );
   }) || null;
 }
 
@@ -348,7 +378,7 @@ async function wlNavigateToDate(panel, config) {
     return false;
   }
   const desiredDate = `${day} de ${months[monthIndex]} de ${year}`;
-  const dateElement = Array.from(calendarGrid.querySelectorAll('[role="gridcell"]')).find(
+  const dateElement = wlCalendarCells(calendarGrid).find(
     (element) =>
       wlNormalize(`${element.getAttribute("aria-label") || ""} ${element.innerText || element.textContent || ""}`)
         .includes(desiredDate)
