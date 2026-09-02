@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .whatsapp_service import GROUP_NAME, WhatsAppProbeResult
+from .whatsapp_service import GROUP_NAME, WhatsAppProbeResult, merge_period_results
 from .config import configuration_directory
 
 
@@ -259,7 +259,11 @@ def load_saved_whatsapp_session(directory: Path) -> WhatsAppProbeResult:
     )
     attachments: list[dict[str, Any]] = []
     album_counts: dict[str, int] = {}
-    for image_path in sorted(directory.glob("*.jpg")):
+    for image_path in sorted(directory.iterdir()):
+        if not image_path.is_file() or image_path.suffix.lower() not in {
+            ".jpg", ".jpeg", ".png", ".webp"
+        }:
+            continue
         message_id = next(
             (candidate for candidate in evidence_ids if image_path.name.startswith(f"{candidate}_")),
             image_path.name.split("_", 1)[0],
@@ -293,6 +297,34 @@ def load_saved_whatsapp_session(directory: Path) -> WhatsAppProbeResult:
     return WhatsAppProbeResult.from_dict(payload)
 
 
+def merge_saved_whatsapp_sessions(
+    current: WhatsAppProbeResult,
+    start_date: date,
+    end_date: date,
+) -> WhatsAppProbeResult:
+    """Reuse verified local captures from earlier attempts of this period."""
+    captures_root = configuration_directory() / "Capturas"
+    start_label = start_date.strftime("%d/%m/%Y")
+    supplemental: list[WhatsAppProbeResult] = []
+    if captures_root.exists():
+        snapshots = sorted(
+            captures_root.glob("*/sessao_whatsapp.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for snapshot in snapshots:
+            try:
+                payload = json.loads(snapshot.read_text(encoding="utf-8"))
+                if str(payload.get("start_date") or "") != start_label:
+                    continue
+                supplemental.append(load_saved_whatsapp_session(snapshot.parent))
+            except (OSError, json.JSONDecodeError, RuntimeError):
+                continue
+    return merge_period_results(
+        current, supplemental, start_date, end_date
+    )
+
+
 def chrome_is_running() -> bool:
     completed = subprocess.run(
         ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/FO", "CSV", "/NH"],
@@ -318,6 +350,7 @@ def probe_whatsapp_chrome(
     bridge = ChromeBridge(start_date, end_date)
     bridge.start()
     try:
-        return bridge.wait_for_result(timeout_seconds)
+        current = bridge.wait_for_result(timeout_seconds)
+        return merge_saved_whatsapp_sessions(current, start_date, end_date)
     finally:
         bridge.close()

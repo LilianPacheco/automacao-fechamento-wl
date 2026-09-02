@@ -20,6 +20,7 @@ from wl_fechamento.stake_parser import parse_stake_text
 from wl_fechamento.whatsapp_service import (
     WhatsAppProbeResult,
     _parse_probe_output,
+    merge_period_results,
     restrict_result_to_period,
 )
 from wl_fechamento.label_parser import normalize_type, parse_document_text, parse_label_text
@@ -112,6 +113,83 @@ class PeriodTests(unittest.TestCase):
         self.assertFalse(filtered.start_date_found)
         self.assertFalse(filtered.period_scan_complete)
         self.assertEqual(len(filtered.incomplete_albums), 1)
+
+    def test_repeated_reads_merge_early_and_late_period_evidence(self) -> None:
+        primary = WhatsAppProbeResult.from_dict({
+            "connected": True,
+            "group_found": True,
+            "start_date_found": True,
+            "period_scan_complete": True,
+            "start_date": "16/08/2026",
+            "evidences": [{
+                "message_id": "late",
+                "message_date": "23/08/2026",
+                "image_count": 1,
+            }],
+        })
+        earlier = WhatsAppProbeResult.from_dict({
+            "connected": True,
+            "group_found": True,
+            "start_date_found": True,
+            "start_date": "16/08/2026",
+            "evidences": [{
+                "message_id": "early",
+                "message_date": "17/08/2026",
+                "image_count": 1,
+            }],
+        })
+
+        merged = merge_period_results(
+            primary, [earlier], date(2026, 8, 16), date(2026, 8, 31)
+        )
+        filtered = restrict_result_to_period(
+            merged, date(2026, 8, 16), date(2026, 8, 31)
+        )
+
+        self.assertEqual(
+            [item.message_date for item in filtered.evidences],
+            ["17/08/2026", "23/08/2026"],
+        )
+        self.assertTrue(filtered.period_scan_complete)
+        self.assertTrue(filtered.start_date_found)
+        self.assertIn(
+            "primeira evidência reconhecida em 17/08/2026",
+            filtered.message,
+        )
+        self.assertEqual(len(filtered.incomplete_albums), 2)
+
+    def test_only_primary_read_can_prove_complete_period_scan(self) -> None:
+        partial = WhatsAppProbeResult.from_dict({
+            "connected": True,
+            "group_found": True,
+            "start_date_found": False,
+            "period_scan_complete": False,
+            "start_date": "16/08/2026",
+            "evidences": [{
+                "message_id": "late",
+                "message_date": "23/08/2026",
+                "image_count": 0,
+            }],
+        })
+        old_complete = WhatsAppProbeResult.from_dict({
+            "connected": True,
+            "group_found": True,
+            "start_date_found": True,
+            "period_scan_complete": True,
+            "start_date": "16/08/2026",
+            "evidences": [{
+                "message_id": "early",
+                "message_date": "17/08/2026",
+                "image_count": 0,
+            }],
+        })
+
+        merged = merge_period_results(
+            partial, [old_complete], date(2026, 8, 16), date(2026, 8, 31)
+        )
+
+        self.assertFalse(merged.period_scan_complete)
+        self.assertFalse(merged.start_date_found)
 
 
     def test_photo_caption_quantity_replaces_default_piece_count(self) -> None:

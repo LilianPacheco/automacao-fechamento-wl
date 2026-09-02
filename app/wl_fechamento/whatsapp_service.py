@@ -246,6 +246,98 @@ def restrict_result_to_period(
     )
 
 
+def merge_period_results(
+    primary: WhatsAppProbeResult,
+    supplemental: list[WhatsAppProbeResult],
+    start_date: date,
+    end_date: date,
+) -> WhatsAppProbeResult:
+    """Consolidate proven evidence from repeated reads of one fortnight.
+
+    WhatsApp navigation is not deterministic: one attempt may reach early
+    dates while another captures later albums.  Repeated sessions are merged
+    by stable message id and attachment hash.  Only the current (primary)
+    session may prove that the full calendar interval was traversed.
+    """
+    sources = [
+        restrict_result_to_period(item, start_date, end_date)
+        for item in [primary, *supplemental]
+    ]
+    evidence_by_id: dict[str, WhatsAppEvidence] = {}
+    for source in sources:
+        for evidence in source.evidences:
+            current = evidence_by_id.get(evidence.message_id)
+            current_richness = (
+                current.image_count + len(current.pdf_names) +
+                bool(current.stake_text) + bool(current.quantity_hint)
+                if current else -1
+            )
+            candidate_richness = (
+                evidence.image_count + len(evidence.pdf_names) +
+                bool(evidence.stake_text) + bool(evidence.quantity_hint)
+            )
+            if current is None or candidate_richness > current_richness:
+                evidence_by_id[evidence.message_id] = evidence
+
+    attachment_by_key: dict[tuple[str, str], WhatsAppAttachment] = {}
+    for source in sources:
+        for attachment in source.captured_attachments:
+            key = (attachment.message_id, attachment.sha256 or attachment.path)
+            if key not in attachment_by_key and Path(attachment.path).exists():
+                attachment_by_key[key] = attachment
+
+    evidences = sorted(
+        evidence_by_id.values(),
+        key=lambda item: (
+            datetime.strptime(item.message_date, "%d/%m/%Y"),
+            item.message_time,
+            item.message_id,
+        ),
+    )
+    attachments = list(attachment_by_key.values())
+
+    def related(message_id: str, evidence_id: str) -> bool:
+        return (
+            message_id == evidence_id or
+            message_id.startswith(evidence_id) or
+            evidence_id.startswith(message_id)
+        )
+
+    incomplete: list[WhatsAppAlbumStatus] = []
+    for evidence in evidences:
+        if evidence.image_count <= 0:
+            continue
+        captured = len({
+            attachment.sha256 or attachment.path
+            for attachment in attachments
+            if related(attachment.message_id, evidence.message_id)
+        })
+        if captured < evidence.image_count:
+            incomplete.append(WhatsAppAlbumStatus(
+                message_id=evidence.message_id,
+                expected=evidence.image_count,
+                captured=captured,
+            ))
+
+    stakes = [item.stake_text for item in evidences if item.stake_text]
+    period_complete = bool(primary.period_scan_complete)
+    return replace(
+        primary,
+        connected=any(item.connected for item in sources),
+        group_found=any(item.group_found for item in sources),
+        start_date=start_date.strftime("%d/%m/%Y"),
+        start_date_found=period_complete and bool(evidences),
+        period_scan_complete=period_complete,
+        visible_images=sum(item.image_count for item in evidences),
+        visible_pdfs=sum(len(item.pdf_names) for item in evidences),
+        ok_reactions=sum(bool(item.has_ok) for item in evidences),
+        stake_messages=stakes,
+        evidences=evidences,
+        captured_attachments=attachments,
+        incomplete_albums=incomplete,
+    )
+
+
 def _parse_probe_output(output: str) -> WhatsAppProbeResult:
     for line in reversed(output.splitlines()):
         try:
