@@ -379,9 +379,16 @@ async function wlNavigateToDate(panel, config) {
   }
   const desiredDate = `${day} de ${months[monthIndex]} de ${year}`;
   const dateElement = wlCalendarCells(calendarGrid).find(
-    (element) =>
-      wlNormalize(`${element.getAttribute("aria-label") || ""} ${element.innerText || element.textContent || ""}`)
-        .includes(desiredDate)
+    (element) => {
+      const label = wlNormalize(
+        `${element.getAttribute("aria-label") || ""} ` +
+        `${element.getAttribute("title") || ""} ` +
+        `${element.innerText || element.textContent || ""}`
+      );
+      // The new calendar exposes some days only as a numeric button. The
+      // month was already verified above, so an exact day number is safe.
+      return label.includes(desiredDate) || label === day;
+    }
   );
   if (!dateElement) {
     wlNavigationStage = "dia não encontrado no calendário";
@@ -389,6 +396,10 @@ async function wlNavigateToDate(panel, config) {
   }
   wlNavigationStage = "selecionando dia";
   wlNavigationDateReached = true;
+  if (dateElement.disabled || dateElement.getAttribute("aria-disabled") === "true") {
+    wlNavigationStage = "dia alcançado sem mensagens";
+    return false;
+  }
   const trustedClick = await wlRequestTrustedClick(dateElement);
   if (!trustedClick) dateElement.click();
   const found = await new Promise((resolve) => {

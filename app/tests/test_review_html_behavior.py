@@ -41,7 +41,7 @@ class ReviewHtmlBehaviorTests(unittest.TestCase):
             manifest["content_scripts"][0]["js"],
             ["quantity.js", "content_v185.js"],
         )
-        self.assertEqual(manifest["version"], "1.8.13")
+        self.assertEqual(manifest["version"], "1.8.14")
 
     def test_reader_reacquires_calendar_after_changing_month(self) -> None:
         reader = (
@@ -53,6 +53,8 @@ class ReviewHtmlBehaviorTests(unittest.TestCase):
         self.assertIn("calendarGrid = wlCalendarGrid();", reader)
         self.assertIn("function wlCalendarCells(root)", reader)
         self.assertIn("'[role=\"dialog\"]'", reader)
+        self.assertIn('label.includes(desiredDate) || label === day', reader)
+        self.assertIn('dia alcançado sem mensagens', reader)
         self.assertIn("calendar_dates_reached: calendarDatesReached", reader)
         self.assertIn("period_scan_complete: Boolean(periodLabels.length)", reader)
         self.assertIn("Leitura incompleta: nem todos os dias", reader)
