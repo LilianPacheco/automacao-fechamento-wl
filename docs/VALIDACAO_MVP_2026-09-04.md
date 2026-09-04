@@ -7,7 +7,7 @@ quinzena, recuperação da captura correta, leitura visual, revisão por situaç
 consolidação de aprovados, backup e escrita no Excel.
 
 A coleta pelo WhatsApp Web deixou de ser obrigatória. A versão 0.4.0 também
-aceita ZIP exportado com mídia, preservando os metadados encontrados no
+aceita ZIP exportado com mídia e pasta normal de fotos, preservando os metadados encontrados no
 arquivo de conversa e enviando datas não comprovadas para revisão.
 
 ## Evidências

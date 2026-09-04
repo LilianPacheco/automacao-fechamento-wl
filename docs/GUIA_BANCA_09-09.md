@@ -16,7 +16,7 @@ evidência não comprova um dado, a entrada permanece pendente.
 2. Selecione a cópia de demonstração da planilha, agosto de 2026 e 2ª quinzena.
 3. Clique em **Validar planilha e período**.
 4. Mostre que existem três entradas possíveis: leitura do WhatsApp Web, última
-   leitura salva e **Importar ZIP do WhatsApp**.
+   leitura salva e **Importar ZIP ou pasta de fotos**.
 5. Para uma demonstração previsível, use a última leitura salva ou importe a
    pasta/ZIP de demonstração.
 6. Abra **Analisar fotos com Leitura Visual 2**. As leituras já processadas são reutilizadas.
@@ -28,7 +28,7 @@ evidência não comprova um dado, a entrada permanece pendente.
 ## Plano de recuperação ao vivo
 
 - Se o WhatsApp não carregar o histórico: use a última leitura salva da mesma quinzena.
-- Se não quiser abrir o WhatsApp: importe o ZIP da conversa exportado com **Incluir mídia**.
+- Se não quiser abrir o WhatsApp: importe o ZIP com **Incluir mídia** ou uma pasta normal com as fotos.
 - Se a internet estiver instável: a análise das fotos já copiadas é local.
 - Se o Excel estiver aberto: feche-o e tente importar novamente; o backup fica preservado.
 - Nunca use a planilha oficial durante a apresentação. Use a cópia identificada como teste.

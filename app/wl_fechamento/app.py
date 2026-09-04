@@ -46,7 +46,7 @@ COLORS = {
 class FechamentoApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Automação do Fechamento WL — Leitura Visual 2 — v0.4.1")
+        self.title("Automação do Fechamento WL — Leitura Visual 2 — v0.4.2")
         self.geometry("1040x610+35+25")
         self.minsize(900, 550)
         self.configure(bg=COLORS["background"])
@@ -220,7 +220,7 @@ class FechamentoApp(tk.Tk):
         self.next_button.pack(fill="x", pady=(12, 0))
         self.local_import_button = ttk.Button(
             content,
-            text="Importar ZIP do WhatsApp",
+            text="Importar ZIP ou pasta de fotos",
             style="Primary.TButton",
             state="disabled",
             command=self._select_local_evidence,
@@ -378,10 +378,26 @@ class FechamentoApp(tk.Tk):
         self._show_whatsapp_result(result, period)
 
     def _select_local_evidence(self) -> None:
-        selected = filedialog.askopenfilename(
-            title="Escolha o ZIP exportado pelo WhatsApp com as mídias",
-            filetypes=[("Arquivo ZIP", "*.zip")],
+        choice = messagebox.askyesnocancel(
+            "Escolher evidências",
+            "Como você quer importar as evidências?\n\n"
+            "Sim: escolher o ZIP do WhatsApp.\n"
+            "Não: escolher uma pasta normal com as fotos.",
+            parent=self,
         )
+        if choice is None:
+            return
+        if choice:
+            selected = filedialog.askopenfilename(
+                title="Escolha o ZIP exportado pelo WhatsApp com as mídias",
+                filetypes=[("Arquivo ZIP", "*.zip")],
+            )
+            source_label = "ZIP selecionado"
+        else:
+            selected = filedialog.askdirectory(
+                title="Escolha a pasta normal que contém as fotos"
+            )
+            source_label = "Pasta selecionada"
         if not selected:
             return
         try:
@@ -393,7 +409,7 @@ class FechamentoApp(tk.Tk):
         self.status_var.set("Copiando evidências locais…")
         self._set_status("warning")
         self._set_details([
-            f"• ZIP selecionado: {selected}",
+            f"• {source_label}: {selected}",
             f"• Período escolhido: {period.label}",
             "• O conteúdo do ZIP será validado antes da análise.",
             "• O WhatsApp e a planilha não serão alterados.",
