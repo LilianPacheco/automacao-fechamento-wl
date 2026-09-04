@@ -46,7 +46,7 @@ COLORS = {
 class FechamentoApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Automação do Fechamento WL — Leitura Visual 2")
+        self.title("Automação do Fechamento WL — Leitura Visual 2 — v0.4")
         self.geometry("1040x610+35+25")
         self.minsize(900, 550)
         self.configure(bg=COLORS["background"])
