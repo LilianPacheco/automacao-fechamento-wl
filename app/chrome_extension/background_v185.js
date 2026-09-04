@@ -106,6 +106,8 @@ async function wlTrustedKey(tabId, key) {
   const supported = {
     ArrowRight: { code: "ArrowRight", virtualKeyCode: 39 },
     ArrowLeft: { code: "ArrowLeft", virtualKeyCode: 37 },
+    ArrowDown: { code: "ArrowDown", virtualKeyCode: 40 },
+    Enter: { code: "Enter", virtualKeyCode: 13 },
     Escape: { code: "Escape", virtualKeyCode: 27 },
   };
   const descriptor = supported[String(key || "")];
@@ -124,6 +126,13 @@ async function wlTrustedKey(tabId, key) {
   await wlDebuggerCommand(target, "Input.dispatchKeyEvent", {
     type: "keyUp", ...parameters,
   });
+  wlScheduleDetach(tabId);
+}
+
+async function wlTrustedText(tabId, text) {
+  const target = { tabId };
+  await wlEnsureDebugger(tabId);
+  await wlDebuggerCommand(target, "Input.insertText", { text: String(text || "") });
   wlScheduleDetach(tabId);
 }
 
@@ -174,6 +183,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     wlTrustedKey(tabId, String(message.key || ""))
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: String(error) }));
+    return true;
+  }
+
+  if (message.type === "WL_TRUSTED_TEXT") {
+    const tabId = sender.tab?.id;
+    if (!Number.isInteger(tabId)) {
+      sendResponse({ ok: false, error: "A aba do WhatsApp não foi identificada." });
+      return false;
+    }
+    wlTrustedText(tabId, String(message.text || ""))
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: String(error) }));
     return true;

@@ -263,8 +263,15 @@ def merge_period_results(
         restrict_result_to_period(item, start_date, end_date)
         for item in [primary, *supplemental]
     ]
+    # A complete current traversal is the authority for which messages belong
+    # to the period.  Older attempts are useful for recovering image bytes,
+    # but some historical builds emitted gallery tiles as if they were extra
+    # messages.  Unioning those stale inventories made a completed read look
+    # incomplete again.  During a partial traversal we still merge inventories
+    # so repeated attempts can progressively recover the period.
+    evidence_sources = [sources[0]] if primary.period_scan_complete else sources
     evidence_by_id: dict[str, WhatsAppEvidence] = {}
-    for source in sources:
+    for source in evidence_sources:
         for evidence in source.evidences:
             current = evidence_by_id.get(evidence.message_id)
             current_richness = (
@@ -279,11 +286,31 @@ def merge_period_results(
             if current is None or candidate_richness > current_richness:
                 evidence_by_id[evidence.message_id] = evidence
 
-    attachment_by_key: dict[tuple[str, str], WhatsAppAttachment] = {}
+    authoritative_ids = set(evidence_by_id)
+    # The same photo can be reported under both a message id and a synthetic
+    # album id.  Its content hash is the identity; counting (message, hash)
+    # duplicated real pieces in the review.
+    attachment_by_key: dict[str, WhatsAppAttachment] = {}
+    coverage_attachments: list[WhatsAppAttachment] = []
     for source in sources:
         for attachment in source.captured_attachments:
-            key = (attachment.message_id, attachment.sha256 or attachment.path)
-            if key not in attachment_by_key and Path(attachment.path).exists():
+            if primary.period_scan_complete and not any(
+                related_id == attachment.message_id or
+                related_id.startswith(attachment.message_id) or
+                attachment.message_id.startswith(related_id)
+                for related_id in authoritative_ids
+            ):
+                continue
+            key = attachment.sha256 or attachment.path
+            if not Path(attachment.path).exists():
+                continue
+            coverage_attachments.append(attachment)
+            existing = attachment_by_key.get(key)
+            candidate_exact = attachment.message_id in authoritative_ids
+            existing_exact = bool(
+                existing and existing.message_id in authoritative_ids
+            )
+            if existing is None or (candidate_exact and not existing_exact):
                 attachment_by_key[key] = attachment
 
     evidences = sorted(
@@ -309,7 +336,7 @@ def merge_period_results(
             continue
         captured = len({
             attachment.sha256 or attachment.path
-            for attachment in attachments
+            for attachment in coverage_attachments
             if related(attachment.message_id, evidence.message_id)
         })
         if captured < evidence.image_count:

@@ -325,6 +325,56 @@ def merge_saved_whatsapp_sessions(
     )
 
 
+def load_latest_complete_whatsapp_session(
+    start_date: date,
+    end_date: date,
+    captures_root: Path | None = None,
+) -> WhatsAppProbeResult:
+    """Open the newest completed local read for exactly this fortnight.
+
+    This is the presentation-safe recovery path: it never substitutes another
+    period and it still merges only locally saved image bytes belonging to the
+    authoritative completed inventory.
+    """
+    root = captures_root or configuration_directory() / "Capturas"
+    start_label = start_date.strftime("%d/%m/%Y")
+    if not root.exists():
+        raise RuntimeError("Nenhuma leitura salva foi encontrada neste computador.")
+    snapshots = sorted(
+        root.glob("*/sessao_whatsapp.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for snapshot in snapshots:
+        try:
+            payload = json.loads(snapshot.read_text(encoding="utf-8"))
+            if str(payload.get("start_date") or "") != start_label:
+                continue
+            if not bool(payload.get("period_scan_complete")):
+                continue
+            current = load_saved_whatsapp_session(snapshot.parent)
+            result = merge_saved_whatsapp_sessions(
+                current, start_date, end_date
+            ) if captures_root is None else merge_period_results(
+                current,
+                [
+                    load_saved_whatsapp_session(item.parent)
+                    for item in snapshots
+                    if item.parent != snapshot.parent
+                    and json.loads(item.read_text(encoding="utf-8")).get("start_date") == start_label
+                ],
+                start_date,
+                end_date,
+            )
+            if result.period_scan_complete and result.captured_attachments:
+                return result
+        except (OSError, json.JSONDecodeError, RuntimeError):
+            continue
+    raise RuntimeError(
+        "Ainda não existe uma leitura completa salva para a quinzena selecionada."
+    )
+
+
 def chrome_is_running() -> bool:
     completed = subprocess.run(
         ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/FO", "CSV", "/NH"],

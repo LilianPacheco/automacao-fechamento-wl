@@ -1,6 +1,6 @@
 # Aplicativo Fechamento WL
 
-Primeira versão do aplicativo Windows para o fechamento quinzenal.
+Versão integrada do aplicativo Windows para o fechamento quinzenal.
 
 ## O que esta versão faz
 
@@ -16,13 +16,19 @@ Primeira versão do aplicativo Windows para o fechamento quinzenal.
 - localiza o grupo `AWL x Expedição Prellog`;
 - carrega o histórico até encontrar a data inicial da quinzena;
 - informa fotos, PDFs, reações 🆗 e entradas de Estaca que estiverem visíveis.
+- recupera uma leitura completa já salva da quinzena correta, sem misturar períodos;
+- analisa as fotos com a Leitura Visual 2;
+- mantém entradas editadas como pendentes até a confirmação explícita;
+- permite filtrar pendentes, confirmados, aprovados e rejeitados;
+- consolida somente os aprovados;
+- grava na aba da quinzena selecionada após criar backup automático.
 
-## O que ainda não faz
+## Limite atual do piloto
 
-- não extrai o conteúdo das fotos ou PDFs;
-- não importa linhas na planilha oficial.
-
-Essas funções serão adicionadas por incrementos, sempre testadas primeiro em cópia segura.
+A leitura visual é deliberadamente conservadora: quando um campo não pode ser
+comprovado, somente esse registro fica pendente. A decisão final permanece com a
+pessoa responsável antes da importação. A importação nunca inclui registros
+pendentes, confirmados ou rejeitados: apenas os marcados como `APROVADO`.
 
 O teste do WhatsApp é somente leitura: não reage nem envia mensagens. Antes de
 iniciar, mantenha somente uma aba do WhatsApp Web aberta no perfil `AWL` e deixe

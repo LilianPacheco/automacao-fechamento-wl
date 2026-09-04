@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from PIL import Image, ImageDraw
 
 from wl_fechamento.config import load_configuration, save_configuration
@@ -30,7 +30,7 @@ from wl_fechamento.review_service import (
     _apply_message_quantity,
     _sanitize_duplicate_measurements,
 )
-from wl_fechamento.workbook_writer_service import rows_to_payload
+from wl_fechamento.workbook_writer_service import rows_to_payload, write_approved_rows
 from wl_fechamento.workbook_service import create_backup, validate_workbook
 
 
@@ -114,7 +114,7 @@ class PeriodTests(unittest.TestCase):
         self.assertFalse(filtered.period_scan_complete)
         self.assertEqual(len(filtered.incomplete_albums), 1)
 
-    def test_repeated_reads_merge_early_and_late_period_evidence(self) -> None:
+    def test_complete_current_read_uses_older_attempts_only_for_attachments(self) -> None:
         primary = WhatsAppProbeResult.from_dict({
             "connected": True,
             "group_found": True,
@@ -148,15 +148,48 @@ class PeriodTests(unittest.TestCase):
 
         self.assertEqual(
             [item.message_date for item in filtered.evidences],
-            ["17/08/2026", "23/08/2026"],
+            ["23/08/2026"],
         )
         self.assertTrue(filtered.period_scan_complete)
         self.assertTrue(filtered.start_date_found)
         self.assertIn(
-            "primeira evidência reconhecida em 17/08/2026",
+            "primeira evidência reconhecida em 23/08/2026",
             filtered.message,
         )
-        self.assertEqual(len(filtered.incomplete_albums), 2)
+        self.assertEqual(len(filtered.incomplete_albums), 1)
+
+    def test_partial_current_read_can_merge_older_inventory(self) -> None:
+        primary = WhatsAppProbeResult.from_dict({
+            "connected": True,
+            "group_found": True,
+            "period_scan_complete": False,
+            "start_date": "16/08/2026",
+            "evidences": [{
+                "message_id": "late",
+                "message_date": "23/08/2026",
+                "image_count": 0,
+            }],
+        })
+        earlier = WhatsAppProbeResult.from_dict({
+            "connected": True,
+            "group_found": True,
+            "start_date": "16/08/2026",
+            "evidences": [{
+                "message_id": "early",
+                "message_date": "17/08/2026",
+                "image_count": 0,
+            }],
+        })
+
+        merged = merge_period_results(
+            primary, [earlier], date(2026, 8, 16), date(2026, 8, 31)
+        )
+
+        self.assertEqual(
+            [item.message_date for item in merged.evidences],
+            ["17/08/2026", "23/08/2026"],
+        )
+        self.assertFalse(merged.period_scan_complete)
 
     def test_only_primary_read_can_prove_complete_period_scan(self) -> None:
         partial = WhatsAppProbeResult.from_dict({
@@ -646,7 +679,7 @@ class LabelParserTests(unittest.TestCase):
             message_date="19/07/2026",
         )
         self.assertEqual(draft.work, "VENTISOL - GALPAO VERTICAL 282")
-        self.assertEqual(draft.product, "VIGA")
+        self.assertEqual(draft.product, "VIGA 6,1 ATÉ 8,9m")
         self.assertEqual(draft.section, "30X80")
         self.assertEqual(draft.piece, "VPR-2")
 
@@ -763,7 +796,10 @@ class LabelParserTests(unittest.TestCase):
             "Comprimento: 5,000 Vol. (m3): 2,000 Peca: PL5",
             message_date="03/08/2026",
         )
-        self.assertEqual((viga.product, viga.type_name), ("VIGA", "VIGA 10,1m ATÉ 15,55m"))
+        self.assertEqual(
+            (viga.product, viga.type_name),
+            ("VIGA 10,1m ATÉ 15,55m", "VIGA 10,1m ATÉ 15,55m"),
+        )
         self.assertEqual((muro.piece, muro.section, muro.product), ("MA_03-A", "VARIAVEL", "MURO"))
         self.assertEqual((laje.product, laje.section), ("LAJE ALVEOLAR", "234X455"))
 
@@ -993,6 +1029,7 @@ class WorkbookTests(unittest.TestCase):
             "DIMENSÕES", "VOL UNIT. (m³)", "VOL TOTAL (m³)",
             "TIPO DE CARGA", "UNID. DE MEDIDA", "R$ UNIT.", "R$ TOTAL",
         ])
+        target["D20"] = "=SUM(D7:D19)"
         table = workbook.create_sheet("TABELA")
         table.append(["TIPO", "VALOR", "UNIDADE"])
         table.append(["ESTACA", 0.75, "m"])
@@ -1021,6 +1058,34 @@ class WorkbookTests(unittest.TestCase):
             self.assertTrue(backup.exists())
             self.assertEqual(backup.parent.name, "Backups Fechamento")
             self.assertEqual(backup.read_bytes(), b"example")
+
+    def test_writer_imports_into_copy_with_backup_and_formulas(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "medicoes.xlsx"
+            self._create_valid_workbook(path)
+            row = ConsolidatedRow(
+                type_name="PILAR",
+                message_date="31/07/2026",
+                work="OBRA TESTE",
+                quantity=2,
+                piece="PP-10",
+                dimensions="40X40 10,000",
+                unit_volume=1.25,
+                cargo_type="PEÇAS ESTOQUE",
+                source_count=2,
+            )
+            result = write_approved_rows(
+                path, PeriodSelection(2026, 7, 2), [row]
+            )
+            self.assertEqual(result.imported_rows, [7])
+            self.assertTrue(result.backup_path.exists())
+            workbook = load_workbook(path, data_only=False)
+            sheet = workbook["2ª quinz.julho"]
+            self.assertEqual(sheet["A7"].value, "PILAR")
+            self.assertEqual(sheet["E7"].value, "PP")
+            self.assertEqual(sheet["F7"].value, "10")
+            self.assertEqual(sheet["I7"].value, "=H7*D7")
+            workbook.close()
 
 
 if __name__ == "__main__":

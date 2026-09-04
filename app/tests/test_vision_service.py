@@ -58,6 +58,17 @@ class VisionDecisionTests(unittest.TestCase):
         self.assertEqual(decisions["piece"].status, "PENDENTE")
         self.assertIn("Somente uma leitura", decisions["piece"].reason)
 
+    def test_high_confidence_explicit_measurement_can_be_confirmed(self) -> None:
+        decisions = decide_fields([
+            VisionReading("motor_neural", COMPLETE_LABEL, 0.93),
+        ])
+
+        self.assertEqual(
+            decisions["length"].status,
+            "CONFIRMADO_AUTOMATICAMENTE",
+        )
+        self.assertEqual(decisions["piece"].status, "PENDENTE")
+
     def test_conflicting_piece_codes_remain_pending(self) -> None:
         decisions = decide_fields([
             VisionReading("motor_a", COMPLETE_LABEL, 0.91),

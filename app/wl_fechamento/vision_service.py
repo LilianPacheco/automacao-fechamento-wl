@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from PIL import Image
 
 from .label_parser import (
     LabelDraft,
+    _explicit_known_work,
+    _fuzzy_known_work,
     _product_from_piece,
     normalize_type,
     parse_document_text,
@@ -18,14 +21,18 @@ from .label_parser import (
 from .ocr_service import (
     _orange_label_crop,
     _prepare_paddle_label,
+    _read_variant,
     read_image_text,
     read_image_text_targeted,
 )
 from .paddle_ocr_service import (
     is_available as paddle_available,
     read_line_texts as read_paddle_line_texts,
+    read_text as read_paddle_text,
 )
 
+
+VISION_PIPELINE_VERSION = 6
 
 READ_FIELDS = ("work", "product", "piece", "section", "length", "unit_volume")
 FIELD_LABELS = {
@@ -102,6 +109,7 @@ class VisionAnalysis:
 
     def to_dict(self) -> dict:
         payload = asdict(self)
+        payload["pipeline_version"] = VISION_PIPELINE_VERSION
         payload["pending_fields"] = self.pending_fields
         return payload
 
@@ -171,10 +179,13 @@ def _valid_value(field_name: str, value: object) -> bool:
             "VIGA", "LAJE ALVEOLAR", "METRO CÚBICO", "VIGA TERÇA",
         }
     if field_name == "piece":
-        return bool(re.fullmatch(r"[A-Z]{1,5}[- ]?[A-Z0-9]{1,12}", text))
+        return bool(re.fullmatch(
+            r"[A-Z]{1,6}[-_]?\d{1,4}[A-Z]?(?:[-_][A-Z0-9]+)*",
+            text.replace(" ", ""),
+        ))
     if field_name == "section":
         return bool(
-            re.fullmatch(r"(?:E\s*=\s*\d{1,3}|\d{1,3}\s*X\s*\d{1,3}|VARIAVEL)", text)
+            re.fullmatch(r"(?:E\s*=\s*\d{1,3}|\d{2,3}\s*X\s*\d{2,3}|VARIAVEL)", text)
         )
     if field_name == "length":
         try:
@@ -188,6 +199,13 @@ def _valid_value(field_name: str, value: object) -> bool:
         except (TypeError, ValueError):
             return False
         return 0 < parsed <= 10
+    if field_name == "work":
+        plain = _plain(text).upper()
+        if any(marker in plain for marker in (
+            "PESO", "VOLUME", "COMPRIMENTO", "PRODUTO", "SECAO", "PECA",
+        )):
+            return False
+        return len(text) <= 100 and bool(re.search(r"[A-Z]{3}", plain))
     return len(text) <= 100
 
 
@@ -213,6 +231,8 @@ def _draft_candidates(reading: VisionReading) -> list[FieldCandidate]:
     for draft in drafts:
         for field_name in READ_FIELDS:
             value = getattr(draft, field_name)
+            if field_name == "work" and value:
+                value = _explicit_known_work(str(value)) or _fuzzy_known_work(str(value)) or value
             normalized = _normalized_value(field_name, value)
             if not normalized or not _valid_value(field_name, value):
                 continue
@@ -242,6 +262,13 @@ def _decimal_tokens(text: str) -> list[tuple[str, float]]:
 
 def _field_crop_value(field_name: str, text: str) -> str | float | None:
     upper = str(text or "").upper()
+    if field_name == "work":
+        cleaned = re.sub(r"^.*?\bOBRA\s*[:.]?\s*", "", upper, count=1)
+        cleaned = re.split(r"\b(?:SIGLA|PRODUTO)\b", cleaned, maxsplit=1)[0]
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" :-|.")
+        canonical = _explicit_known_work(cleaned) or _fuzzy_known_work(cleaned)
+        cleaned = canonical or cleaned
+        return cleaned if 3 <= len(cleaned) <= 100 else None
     if field_name == "section":
         match = re.search(r"\b(E\s*=\s*\d{1,3}|\d{1,3}\s*[X×]\s*\d{1,3})", upper)
         return re.sub(r"\s+", "", match.group(1)).replace("×", "X") if match else None
@@ -252,15 +279,32 @@ def _field_crop_value(field_name: str, text: str) -> str | float | None:
         plausible = [value for _, value in _decimal_tokens(upper) if 0 < value <= 10]
         return plausible[-1] if plausible else None
     if field_name == "piece":
-        match = re.search(r"\b([A-Z]{1,5}\s*[- ]\s*[A-Z0-9]{1,12})\b", upper)
-        return re.sub(r"\s+", "", match.group(1)) if match else None
+        cleaned = re.sub(r"^.*?\bPE[CÇ]A\s*[:.]?\s*", "", upper, count=1)
+        matches = re.findall(
+            r"\b(?:PL|PM|VPT|VPR|VRT|VCR|VOL|VL|VR|VP|PP|PH|PA|MA|BL|EP)"
+            r"[-_ ]?\d{1,4}[A-Z]?(?:[-_ ][A-Z0-9]+)?\b",
+            cleaned,
+        )
+        if matches:
+            return re.sub(r"\s+", "", matches[0]).replace("_", "-")
+        return None
     if field_name == "product":
         normalized = _plain(upper).upper()
-        for product in (
+        products = (
             "LAJE ALVEOLAR", "VIGA TERCA", "METRO CUBICO", "BLOCO",
             "ESTACA", "ESCADA", "MURO", "PAINEL", "PILAR", "VIGA",
-        ):
+        )
+        for product in products:
             if product in normalized:
+                return product.replace("TERCA", "TERÇA").replace("CUBICO", "CÚBICO")
+        words = re.findall(r"[A-Z]{4,15}", normalized)
+        ranked = [
+            (SequenceMatcher(None, word, product).ratio(), product)
+            for word in words for product in products
+        ]
+        if ranked:
+            score, product = max(ranked)
+            if score >= 0.80:
                 return product.replace("TERCA", "TERÇA").replace("CUBICO", "CÚBICO")
     return None
 
@@ -327,7 +371,18 @@ def decide_fields(
                     f"{support} leituras independentes concordaram com o valor."
                 )
             elif support == 1:
-                decision.reason = "Somente uma leitura comprovou este campo."
+                strongest = max(candidate.confidence for candidate in winner)
+                if (
+                    field_name in {"product", "section", "length", "unit_volume"}
+                    and strongest >= 0.84
+                    and any(candidate.explicit_label for candidate in winner)
+                ):
+                    decision.status = "CONFIRMADO_AUTOMATICAMENTE"
+                    decision.reason = (
+                        "Leitura de alta confiança vinculada ao nome impresso do campo."
+                    )
+                else:
+                    decision.reason = "Somente uma leitura comprovou este campo."
             else:
                 decision.reason = "Leituras conflitantes para este campo."
         elif candidates:
@@ -359,7 +414,10 @@ def _save_evidence_crops(image_path: Path, output_dir: Path) -> tuple[str, dict[
     return str(label_path), crop_paths
 
 
-def _read_isolated_fields(crop_paths: dict[str, str]) -> list[VisionReading]:
+def _read_isolated_fields(
+    crop_paths: dict[str, str],
+    field_names: set[str] | None = None,
+) -> list[VisionReading]:
     """Read field strips as a third pass, independent of full-label layout."""
     if not paddle_available():
         return []
@@ -367,6 +425,7 @@ def _read_isolated_fields(crop_paths: dict[str, str]) -> list[VisionReading]:
         field_name
         for field_name in ("work", "product", "section", "length", "unit_volume", "piece")
         if crop_paths.get(field_name)
+        and (field_names is None or field_name in field_names)
     ]
     ordered_paths = [Path(crop_paths[field_name]) for field_name in ordered_fields]
     readings = read_paddle_line_texts(ordered_paths, quality="medium")
@@ -385,21 +444,45 @@ def _read_isolated_fields(crop_paths: dict[str, str]) -> list[VisionReading]:
 def analyze_image(image_path: Path, output_dir: Path) -> VisionAnalysis:
     """Create an auditable local analysis without touching the workbook."""
     label_path, crop_paths = _save_evidence_crops(image_path, output_dir)
-    primary = read_image_text(image_path)
-    targeted = read_image_text_targeted(image_path)
-    readings = [
-        VisionReading(
-            engine="leitura_principal",
-            text=primary.text,
-            confidence=min(0.99, max(0.0, primary.score / 220)),
-        ),
-        VisionReading(
-            engine="leitura_direcionada",
-            text=targeted.text,
-            confidence=min(0.99, max(0.0, targeted.score / 220)),
-        ),
-    ]
-    readings.extend(_read_isolated_fields(crop_paths))
+    if paddle_available():
+        # A fast neural pass and the independent Windows OCR read the same
+        # rectified label.  The accurate neural recognizer is then reserved,
+        # in shared batches, only for fields on which these passes do not
+        # agree.  This preserves consensus without taking hours per fortnight.
+        small_text, small_confidence = read_paddle_text(
+            Path(label_path), quality="small"
+        )
+        try:
+            windows_text = _read_variant(Path(label_path))
+        except Exception:
+            windows_text = ""
+        readings = [
+            VisionReading(
+                engine="ppocr_v6_small",
+                text=small_text,
+                confidence=float(small_confidence),
+            ),
+            VisionReading(
+                engine="windows_ocr",
+                text=windows_text,
+                confidence=0.70 if windows_text else 0.0,
+            ),
+        ]
+    else:
+        primary = read_image_text(image_path)
+        targeted = read_image_text_targeted(image_path)
+        readings = [
+            VisionReading(
+                engine="leitura_principal",
+                text=primary.text,
+                confidence=min(0.99, max(0.0, primary.score / 220)),
+            ),
+            VisionReading(
+                engine="leitura_direcionada",
+                text=targeted.text,
+                confidence=min(0.99, max(0.0, targeted.score / 220)),
+            ),
+        ]
     decisions = decide_fields(readings, crop_paths)
     product = decisions["product"].value or ""
     length = decisions["length"].value or ""
@@ -417,6 +500,59 @@ def analyze_image(image_path: Path, output_dir: Path) -> VisionAnalysis:
         readings=readings,
         product_type=product_type,
     )
+
+
+def enrich_isolated_fields_batch(
+    analyses: list[VisionAnalysis],
+    batch_size: int = 64,
+) -> None:
+    """Re-read only unresolved field strips in efficient shared batches."""
+    if not analyses or not paddle_available():
+        return
+    jobs: list[tuple[VisionAnalysis, str, Path]] = []
+    for analysis in analyses:
+        for field_name, decision in analysis.fields.items():
+            if (
+                decision.status != "CONFIRMADO_AUTOMATICAMENTE"
+                and decision.crop_path
+                and Path(decision.crop_path).exists()
+                and not any(
+                    reading.field_hint == field_name
+                    for reading in analysis.readings
+                )
+            ):
+                jobs.append((analysis, field_name, Path(decision.crop_path)))
+    for offset in range(0, len(jobs), max(1, batch_size)):
+        batch = jobs[offset:offset + max(1, batch_size)]
+        recognized = read_paddle_line_texts(
+            [path for _, _, path in batch], quality="small"
+        )
+        for (analysis, field_name, _), (text, confidence) in zip(batch, recognized):
+            # Keep an empty/low-confidence attempt in the audit too, so a
+            # reopened review does not rerun the same expensive crop forever.
+            analysis.readings.append(VisionReading(
+                engine=f"campo_isolado_{field_name}",
+                text=str(text).strip() if float(confidence) >= 0.30 else "",
+                confidence=float(confidence),
+                field_hint=field_name,
+            ))
+    for analysis in analyses:
+        crop_paths = {
+            name: decision.crop_path
+            for name, decision in analysis.fields.items()
+        }
+        analysis.fields = decide_fields(analysis.readings, crop_paths)
+        product = analysis.fields["product"].value or ""
+        length = analysis.fields["length"].value or ""
+        parsed_length = None
+        if length:
+            try:
+                parsed_length = float(str(length).replace(".", "").replace(",", "."))
+            except ValueError:
+                pass
+        analysis.product_type = (
+            normalize_type("", str(product), parsed_length) if product else ""
+        )
 
 
 def _evidence_group(source_path: str) -> str:

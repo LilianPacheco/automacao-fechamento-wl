@@ -10,6 +10,7 @@ app/node_modules/
 **/node_modules/
 app/vendor_ocr/
 app/runtime_tcl/
+app/runtime_validation/
 
 # Capturas e dados reais de operação
 app/runtime_captures/

@@ -53,18 +53,25 @@ function wlGroupMatches(value, groupName) {
 function wlCurrentConversationTitle() {
   const header = document.querySelector("#main header");
   if (!header) return "";
-  const headerText = (header.innerText || header.textContent || "").trim();
-  if (headerText) return headerText;
-  const titled = Array.from(header.querySelectorAll("[title]")).find(
-    (element) => (element.getAttribute("title") || "").trim()
-  );
-  return (
-    titled?.getAttribute("title") ||
+  // In recent WhatsApp builds the visible text may contain only the presence
+  // status (for example, "online"), while the conversation name lives in a
+  // title/aria-label attribute. Keep every header representation so the group
+  // matcher can still prove which conversation is open.
+  const values = [
+    header.innerText,
+    header.textContent,
     document.querySelector('[data-testid="conversation-info-header-chat-title"]')
-      ?.textContent ||
-    header.textContent ||
-    ""
-  ).trim();
+      ?.textContent,
+    ...Array.from(header.querySelectorAll("[title], [aria-label]")).flatMap(
+      (element) => [
+        element.getAttribute("title"),
+        element.getAttribute("aria-label"),
+        element.textContent,
+      ]
+    ),
+  ];
+  return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)))
+    .join(" ");
 }
 
 function wlExactElement(root, text) {
@@ -161,6 +168,23 @@ function wlRequestTrustedClick(element) {
   });
 }
 
+function wlRequestTrustedPoint(x, y) {
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = (value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      resolve(value);
+    };
+    const timeout = setTimeout(() => finish(false), 1800);
+    chrome.runtime.sendMessage({ type: "WL_TRUSTED_CLICK", x, y }, (response) => {
+      void chrome.runtime.lastError;
+      finish(Boolean(response?.ok));
+    });
+  });
+}
+
 function wlRequestTrustedKey(key) {
   return new Promise((resolve) => {
     let finished = false;
@@ -172,6 +196,23 @@ function wlRequestTrustedKey(key) {
     };
     const timeout = setTimeout(() => finish(false), 1800);
     chrome.runtime.sendMessage({ type: "WL_TRUSTED_KEY", key }, (response) => {
+      void chrome.runtime.lastError;
+      finish(Boolean(response?.ok));
+    });
+  });
+}
+
+function wlRequestTrustedText(text) {
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = (value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      resolve(value);
+    };
+    const timeout = setTimeout(() => finish(false), 2500);
+    chrome.runtime.sendMessage({ type: "WL_TRUSTED_TEXT", text }, (response) => {
       void chrome.runtime.lastError;
       finish(Boolean(response?.ok));
     });
@@ -435,6 +476,24 @@ function wlDateKey(value) {
   const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value || "");
   if (!match) return 0;
   return Number(`${match[3]}${match[2].padStart(2, "0")}${match[1].padStart(2, "0")}`);
+}
+
+function wlVisibleChronologyDates(panel) {
+  const labels = [];
+  for (const metadata of panel.querySelectorAll("[data-pre-plain-text]")) {
+    const plain = metadata.getAttribute("data-pre-plain-text") || "";
+    const match = /^\[\d{1,2}:\d{2},\s*(\d{1,2}\/\d{1,2}\/\d{4})\]/.exec(plain);
+    if (match) labels.push(match[1]);
+  }
+  for (const element of panel.querySelectorAll("span, div")) {
+    if (element.children.length !== 0) continue;
+    const text = (element.textContent || "").trim();
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text)) labels.push(text);
+  }
+  return Array.from(new Set(labels.map((label) => {
+    const parts = label.split("/");
+    return wlDateFromParts(Number(parts[0]), Number(parts[1]), Number(parts[2]));
+  }).filter(Boolean)));
 }
 
 // A quinzena is a date interval, not a requirement that a message exists on
@@ -894,6 +953,40 @@ function wlNextViewerButton(root) {
   })[0] || null;
 }
 
+function wlPreviousViewerButton(root) {
+  const explicit = wlViewerButton(
+    root, ["anterior", "voltar", "previous", "prev"]
+  );
+  if (explicit) return explicit;
+  const icon = root?.querySelector?.(
+    '[data-testid*="prev"], [data-icon*="prev"], [data-icon*="left"], ' +
+    '[aria-label*="Anterior" i], [title*="Anterior" i]'
+  );
+  return icon?.closest?.('button, [role="button"]') || icon || null;
+}
+
+async function wlRewindViewer(viewer, panel, maximumSteps) {
+  for (let step = 0; step < maximumSteps; step += 1) {
+    viewer = wlMediaViewerRoot(panel) || viewer;
+    const image = wlLargestLoadedImage(viewer);
+    const previousSource = image?.currentSrc || image?.getAttribute?.("src") || "";
+    const previousButton = wlPreviousViewerButton(viewer);
+    let moved = false;
+    if (previousButton && !previousButton.disabled &&
+        previousButton.getAttribute("aria-disabled") !== "true") {
+      moved = await wlRequestTrustedClick(previousButton);
+      if (!moved) previousButton.click();
+    } else {
+      moved = await wlRequestTrustedKey("ArrowLeft");
+    }
+    if (!moved) break;
+    const loaded = await wlWaitForViewerImage(viewer, previousSource);
+    if (!loaded) break;
+    viewer = loaded.root || viewer;
+  }
+  return wlMediaViewerRoot(panel) || viewer;
+}
+
 async function wlAdvanceViewer(viewer, panel, previousSource) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     viewer = wlMediaViewerRoot(panel) || viewer;
@@ -928,12 +1021,16 @@ async function wlWaitForViewerToClose(viewer) {
 }
 
 async function wlCloseExistingViewer() {
-  const viewer = document.querySelector('[data-testid="media-viewer-modal"]');
+  const viewer = wlMediaViewerRoot(null);
   if (!viewer) return true;
   const closeButton = wlViewerButton(viewer, ["fechar", "close"]);
-  if (!closeButton) return false;
-  const closed = await wlRequestTrustedClick(closeButton);
-  if (!closed) closeButton.click();
+  if (closeButton) {
+    const closed = await wlRequestTrustedClick(closeButton);
+    if (!closed) closeButton.click();
+  } else {
+    const closed = await wlRequestTrustedKey("Escape");
+    if (!closed) return false;
+  }
   return wlWaitForViewerToClose(viewer);
 }
 
@@ -992,6 +1089,10 @@ async function wlCaptureAlbumAttachments(item, config, uploadedSources, panel) {
   }
   if (!viewer) return 0;
 
+  // Album previews may open on the fourth (or another) thumbnail. Always
+  // rewind to the first photo before counting/copying the sequence.
+  viewer = await wlRewindViewer(viewer, panel, item.image_count);
+
   let captured = 0;
   let previousSource = "";
   let prefetched = null;
@@ -1032,13 +1133,17 @@ async function wlCaptureAlbumAttachments(item, config, uploadedSources, panel) {
     if (!closed) closeButton.click();
     await wlWaitForViewerToClose(viewer);
   } else {
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const closed = await wlRequestTrustedKey("Escape");
+    if (!closed) {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    }
   }
   return captured;
 }
 
 async function wlUploadInventoryAttachments(items, config, uploadedSources) {
   const pending = [];
+  const directCounts = new Map();
   for (const item of items) {
     if (item.image_count > 1) {
       const panel = document.querySelector('[data-testid="conversation-panel-messages"]');
@@ -1073,6 +1178,10 @@ async function wlUploadInventoryAttachments(items, config, uploadedSources) {
           config, current.item, current.source, current.sourceIndex
         );
         if (!uploaded) uploadedSources.delete(current.source);
+        else directCounts.set(
+          current.item.message_id,
+          (directCounts.get(current.item.message_id) || 0) + 1
+        );
       } catch (error) {
         wlAttachmentErrors.push(String(error?.message || error));
         uploadedSources.delete(current.source);
@@ -1084,6 +1193,14 @@ async function wlUploadInventoryAttachments(items, config, uploadedSources) {
     () => worker()
   );
   await Promise.all(workers);
+  for (const item of items) {
+    const direct = directCounts.get(item.message_id) || 0;
+    if (direct) {
+      item.album_captured_count = Math.max(
+        Number(item.album_captured_count || 0), direct
+      );
+    }
+  }
 }
 
 function wlCollectEvidence(panel, config) {
@@ -1106,13 +1223,18 @@ async function wlCollectPeriodEvidence(panel, config, base) {
   let calendarAttempts = 0;
   let calendarDatesFound = 0;
   let calendarDatesReached = 0;
+  const chronologyDates = new Set();
+  let recentBoundaryReached = false;
   const uploadedSources = new Set();
+  const startKey = wlDateKey(config.start_label);
+  const endKey = wlDateKey(config.end_label);
 
   for (let step = 0; step < 300; step += 1) {
     completedSteps = step + 1;
     panel = document.querySelector('[data-testid="conversation-panel-messages"]') || panel;
     const batch = wlCollectInventory(panel, config, { seen, date_state: dateState });
     inventory.push(...batch);
+    for (const label of wlVisibleChronologyDates(panel)) chronologyDates.add(label);
     await wlUploadInventoryAttachments(batch, config, uploadedSources);
 
     if (!jumpToRecent) {
@@ -1124,6 +1246,7 @@ async function wlCollectPeriodEvidence(panel, config, base) {
       if (jumpButton) {
         jumpButtonFound = true;
         jumpButton.click();
+        recentBoundaryReached = true;
         dateState.current_date = "";
         await wlSleep(2000);
         continue;
@@ -1174,6 +1297,7 @@ async function wlCollectPeriodEvidence(panel, config, base) {
     const afterTop = scrollable.scrollTop;
     if (Math.abs(afterTop - beforeTop) < 1) {
       unchangedSteps += 1;
+      if (direction > 0) recentBoundaryReached = true;
     } else {
       unchangedSteps = 0;
       scrollMoves += 1;
@@ -1217,7 +1341,16 @@ async function wlCollectPeriodEvidence(panel, config, base) {
   }
 
   panel = document.querySelector('[data-testid="conversation-panel-messages"]') || panel;
+  for (const label of wlVisibleChronologyDates(panel)) chronologyDates.add(label);
   inventory.push(...wlCollectInventory(panel, config, { seen, date_state: dateState }));
+  const chronologyKeys = Array.from(chronologyDates).map(wlDateKey).filter(Boolean);
+  const earliestChronologyKey = chronologyKeys.length ? Math.min(...chronologyKeys) : 0;
+  const latestChronologyKey = chronologyKeys.length ? Math.max(...chronologyKeys) : 0;
+  const crossedStartBoundary = earliestChronologyKey > 0 && earliestChronologyKey < startKey;
+  // At the live/recent edge, the absence of messages through the selected end
+  // date is itself evidence. This is important for weekends and quiet days.
+  const crossedEndBoundary = latestChronologyKey > endKey || recentBoundaryReached;
+  const continuousPeriodCovered = crossedStartBoundary && crossedEndBoundary;
   return {
     ...wlSummarizeInventory(inventory),
     start_date_observed: wlHasPeriodEvidence(inventory, config),
@@ -1231,9 +1364,19 @@ async function wlCollectPeriodEvidence(panel, config, base) {
     calendar_attempts: calendarAttempts,
     calendar_dates_found: calendarDatesFound,
     calendar_dates_reached: calendarDatesReached,
-    period_scan_complete: Boolean(periodLabels.length) &&
+    chronology_first_date: chronologyKeys.length
+      ? Array.from(chronologyDates).sort((left, right) => wlDateKey(left) - wlDateKey(right))[0]
+      : "",
+    chronology_last_date: chronologyKeys.length
+      ? Array.from(chronologyDates).sort((left, right) => wlDateKey(right) - wlDateKey(left))[0]
+      : "",
+    crossed_start_boundary: crossedStartBoundary,
+    crossed_end_boundary: crossedEndBoundary,
+    period_scan_complete: continuousPeriodCovered || (
+      Boolean(periodLabels.length) &&
       calendarAttempts === periodLabels.length &&
-      calendarDatesReached === periodLabels.length,
+      calendarDatesReached === periodLabels.length
+    ),
   };
 }
 
@@ -1449,48 +1592,210 @@ function wlGetConfig() {
   });
 }
 
-async function wlOpenGroup(groupName) {
+async function wlOpenGroup(groupName, base = null) {
+  const searchRegion = () =>
+    document.querySelector("#side") ||
+    document.querySelector('[data-testid="chat-list"]')?.parentElement ||
+    document.querySelector('[aria-label*="lista de conversas" i]') ||
+    document;
+
+  const findSearch = () => {
+    const side = searchRegion();
+    const selectors = [
+      '[contenteditable="true"][role="textbox"]',
+      '[contenteditable="true"][data-tab="3"]',
+      'input[role="searchbox"]',
+      'input[type="search"]',
+      'input[placeholder*="Pesquisar" i]',
+      'input[placeholder*="Search" i]',
+      'input',
+      '[aria-label*="Pesquisar" i]',
+      '[aria-label*="Search" i]',
+      '[data-lexical-editor="true"]',
+    ];
+    return Array.from(side.querySelectorAll(selectors.join(","))).find((element) => {
+      const label = wlNormalize(wlAccessibleText(element));
+      const rect = element.getBoundingClientRect();
+      const outsideConversation = !element.closest("#main");
+      const isOnlyChatListInput = element.matches("input") &&
+        side.querySelectorAll("input").length === 1 && outsideConversation &&
+        rect.width >= 80 && rect.height >= 16;
+      return element.matches('input[type="search"], input[role="searchbox"]') ||
+        isOnlyChatListInput ||
+        label.includes("pesquis") || label.includes("search") ||
+        (outsideConversation && rect.top < 260 && rect.left < window.innerWidth * 0.55);
+    }) || null;
+  };
+
+  const openSearch = () => {
+    const side = searchRegion();
+    const controls = Array.from(side.querySelectorAll(
+      'button, [role="button"], [data-icon], [data-testid]'
+    ));
+    const trigger = controls.find((element) => {
+      const label = wlNormalize(wlAccessibleText(element));
+      const icon = wlNormalize(
+        `${element.getAttribute("data-icon") || ""} ` +
+        `${element.getAttribute("data-testid") || ""}`
+      );
+      const rect = element.getBoundingClientRect();
+      const inChatListHeader = rect.top < 260 && rect.left < window.innerWidth * 0.55;
+      return label.includes("pesquisar") || label.includes("search") ||
+        ((icon === "search" || icon.includes("chat-list-search")) && inChatListHeader);
+    });
+    const clickable = trigger?.closest('button, [role="button"]') || trigger;
+    if (!clickable) return false;
+    clickable.click();
+    return true;
+  };
+
+  const domSummary = () => {
+    const region = searchRegion();
+    return [
+      `estado=${document.readyState}`,
+      `lateral=${Boolean(document.querySelector("#side"))}`,
+      `conversa=${Boolean(document.querySelector("#main"))}`,
+      `editaveis=${region.querySelectorAll('[contenteditable="true"]').length}`,
+      `campos=${region.querySelectorAll("input").length}`,
+      `botoes=${region.querySelectorAll('button, [role="button"]').length}`,
+    ].join(", ");
+  };
+
+  const replaceSearchText = async (search, value) => {
+    search.focus();
+    let trusted = false;
+    if (search instanceof HTMLInputElement || search instanceof HTMLTextAreaElement) {
+      search.select();
+      trusted = await wlRequestTrustedText(value);
+      if (trusted) return true;
+      const prototype = search instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      if (setter) setter.call(search, value);
+      else search.value = value;
+    } else {
+      document.execCommand("selectAll", false, null);
+      trusted = await wlRequestTrustedText(value);
+      if (trusted) return true;
+      if (!document.execCommand("insertText", false, value)) {
+        search.textContent = value;
+      }
+    }
+    search.dispatchEvent(new InputEvent("input", {
+      bubbles: true,
+      inputType: "insertText",
+      data: value,
+    }));
+    search.dispatchEvent(new Event("change", { bubbles: true }));
+    search.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "a" }));
+    return false;
+  };
+
   let search = null;
-  for (let wait = 0; wait < 120; wait += 1) {
+  for (let wait = 0; wait < 40; wait += 1) {
     if (wlGroupMatches(wlCurrentConversationTitle(), groupName)) return true;
-    search =
-      document.querySelector('[contenteditable="true"][aria-label*="Pesquisar"]') ||
-      document.querySelector('[contenteditable="true"][data-tab="3"]') ||
-      document.querySelector('[aria-label*="Pesquisar ou começar"]') ||
-      Array.from(document.querySelectorAll('[contenteditable="true"][role="textbox"]'))
-        .find((element) =>
-          /pesquisar|search/i.test(
-            `${element.getAttribute("aria-label") || ""} ${element.getAttribute("title") || ""}`
-          )
-        );
+    search = findSearch();
     if (search) break;
+    if (wait === 0 || wait % 10 === 0) openSearch();
+    if (base && wait > 0 && wait % 10 === 0) {
+      wlPost({
+        ...base,
+        final: false,
+        group_found: false,
+        start_date_found: false,
+        message: `Localizando o grupo no WhatsApp (tentativa ${wait / 10 + 1}; ${domSummary()}).`,
+      });
+    }
     await wlSleep(500);
   }
   if (!search) return false;
 
-  search.focus();
-  document.execCommand("selectAll", false, null);
-  document.execCommand("insertText", false, groupName);
-  search.dispatchEvent(new InputEvent("input", { bubbles: true, data: groupName }));
+  const trustedSearch = await replaceSearchText(search, groupName);
+  if (base) {
+    wlPost({
+      ...base,
+      final: false,
+      group_found: false,
+      start_date_found: false,
+      message: `Busca do grupo preenchida (digitação real=${trustedSearch ? "sim" : "não"}; tamanho=${String(search.value || search.textContent || "").length}).`,
+    });
+  }
   let title = null;
   for (let wait = 0; wait < 30 && !title; wait += 1) {
-    const titles = Array.from(document.querySelectorAll(
-      '[data-testid="cell-frame-title"], [title], span, div'
+    const side = searchRegion();
+    const titles = Array.from(side.querySelectorAll(
+      '[data-testid="cell-frame-title"], [title], [aria-label], [role="listitem"] span, [role="row"] span, span, div'
     ));
     title = titles.find(
       (element) =>
-        element.children.length === 0 &&
+        element.offsetParent !== null &&
+        element !== search &&
         wlGroupMatches(
-          element.getAttribute?.("title") || element.textContent,
+          `${element.getAttribute?.("title") || ""} ` +
+          `${element.getAttribute?.("aria-label") || ""} ` +
+          `${element.textContent || ""}`,
           groupName
         )
     );
     if (!title) await wlSleep(500);
   }
-  if (!title) return false;
-  (title.closest('[role="row"]') || title).click();
-  for (let wait = 0; wait < 20; wait += 1) {
+  if (!title) {
+    const side = searchRegion();
+    const searchRect = search.getBoundingClientRect();
+    const resultRows = Array.from(side.querySelectorAll(
+      '[role="row"], [role="listitem"], [data-testid*="cell" i], [tabindex="-1"]'
+    )).filter((element) => {
+      const rect = element.getBoundingClientRect();
+      return element !== search && rect.width >= 160 && rect.height >= 28 &&
+        rect.top >= searchRect.bottom + 2 && rect.top < window.innerHeight;
+    }).sort((left, right) =>
+      left.getBoundingClientRect().top - right.getBoundingClientRect().top
+    );
+    if (resultRows.length) {
+      await wlRequestTrustedClick(resultRows[0]);
+      for (let wait = 0; wait < 20; wait += 1) {
+        if (wlGroupMatches(wlCurrentConversationTitle(), groupName)) return true;
+        await wlSleep(300);
+      }
+    } else if (searchRect.width > 0) {
+      await wlRequestTrustedPoint(
+        searchRect.left + (searchRect.width / 2),
+        Math.min(window.innerHeight - 30, searchRect.bottom + 65)
+      );
+      for (let wait = 0; wait < 20; wait += 1) {
+        if (wlGroupMatches(wlCurrentConversationTitle(), groupName)) return true;
+        await wlSleep(300);
+      }
+    }
+    // Some current builds keep the result text outside the accessible DOM.
+    // With the full group name already typed, keyboard selection opens the
+    // first filtered result; the header is still verified before accepting it.
+    search.focus();
+    const trustedDown = await wlRequestTrustedKey("ArrowDown");
+    const trustedEnter = await wlRequestTrustedKey("Enter");
+    if (!trustedDown) search.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true, key: "ArrowDown", code: "ArrowDown",
+    }));
+    if (!trustedEnter) search.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true, key: "Enter", code: "Enter",
+    }));
+    for (let wait = 0; wait < 30; wait += 1) {
+      if (wlGroupMatches(wlCurrentConversationTitle(), groupName)) return true;
+      await wlSleep(500);
+    }
+    return false;
+  }
+  const row = title.closest(
+    '[data-testid="cell-frame-container"], [role="listitem"], [role="row"], [tabindex="-1"]'
+  ) || title;
+  row.click();
+  for (let wait = 0; wait < 40; wait += 1) {
     if (wlGroupMatches(wlCurrentConversationTitle(), groupName)) return true;
+    if (
+      document.querySelector('[data-testid="conversation-panel-messages"]') &&
+      wlGroupMatches(title.getAttribute?.("title") || title.textContent, groupName)
+    ) return true;
     await wlSleep(500);
   }
   return false;
@@ -1593,7 +1898,7 @@ async function wlAnalyze(config) {
   };
 
   wlNavigationStage = "abrindo grupo";
-  const groupFound = await wlOpenGroup(config.group_name);
+  const groupFound = await wlOpenGroup(config.group_name, base);
   if (!groupFound) {
     wlPost({
       ...base,

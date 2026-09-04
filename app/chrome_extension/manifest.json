@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Fechamento WL — Leitor do WhatsApp",
-  "version": "1.8.14",
+  "version": "1.8.25",
   "description": "Leitura local e somente leitura do grupo de fechamento WL.",
   "permissions": ["debugger", "storage", "alarms"],
   "host_permissions": [

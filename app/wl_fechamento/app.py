@@ -3,14 +3,17 @@ from __future__ import annotations
 import tkinter as tk
 import threading
 import os
-import subprocess
-import sys
+import json
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .config import load_configuration, save_configuration
-from .chrome_bridge import probe_whatsapp_chrome
+from .chrome_bridge import (
+    load_latest_complete_whatsapp_session,
+    probe_whatsapp_chrome,
+)
 from .models import MONTH_NAMES, MONTH_NUMBERS, AppConfiguration, PeriodSelection
 from .label_parser import LabelDraft
 from .grouping_service import ConsolidatedRow, group_approved_drafts
@@ -64,6 +67,7 @@ class FechamentoApp(tk.Tk):
         # Never preload the generic HTML from a previous fortnight.
         self.review_html_path: Path | None = None
         self.review_period_key: str | None = None
+        self.review_window: ReviewWindow | None = None
 
         self._build_styles()
         self._build_layout()
@@ -213,6 +217,14 @@ class FechamentoApp(tk.Tk):
             command=self._start_whatsapp_probe,
         )
         self.next_button.pack(fill="x", pady=(12, 0))
+        self.saved_read_button = ttk.Button(
+            content,
+            text="Usar última leitura salva desta quinzena",
+            style="Secondary.TButton",
+            state="disabled",
+            command=self._use_saved_read,
+        )
+        self.saved_read_button.pack(fill="x", pady=(8, 0))
         self.review_button = ttk.Button(
             content,
             text="Analisar fotos com Leitura Visual 2",
@@ -272,6 +284,9 @@ class FechamentoApp(tk.Tk):
         if result.valid:
             # Validating a period starts a fresh review context. A previous
             # fortnight can no longer be opened from this selection.
+            if self.review_window is not None and self.review_window.winfo_exists():
+                self.review_window.destroy()
+            self.review_window = None
             self.last_whatsapp_result = None
             self.last_probe_period = None
             self.review_html_path = None
@@ -287,6 +302,7 @@ class FechamentoApp(tk.Tk):
             self.status_var.set("Configuração válida")
             self._set_status("success")
             self.next_button.configure(state="normal")
+            self.saved_read_button.configure(state="normal")
             details.append("")
             details.append("✓ Localização memorizada para a próxima execução.")
             details.append("✓ Nenhuma célula foi modificada.")
@@ -294,6 +310,7 @@ class FechamentoApp(tk.Tk):
             self.status_var.set("Configuração precisa de correção")
             self._set_status("error")
             self.next_button.configure(state="disabled")
+            self.saved_read_button.configure(state="disabled")
             details.append("")
             details.append("A planilha não foi configurada. Corrija os itens acima.")
         self._set_details(details)
@@ -305,6 +322,9 @@ class FechamentoApp(tk.Tk):
             messagebox.showwarning("Período inválido", str(exc))
             return
 
+        if self.review_window is not None and self.review_window.winfo_exists():
+            self.review_window.destroy()
+        self.review_window = None
         self.last_whatsapp_result = None
         self.last_probe_period = None
         self.review_html_path = None
@@ -329,6 +349,22 @@ class FechamentoApp(tk.Tk):
             daemon=True,
         )
         worker.start()
+
+    def _use_saved_read(self) -> None:
+        try:
+            period = self._period()
+            result = load_latest_complete_whatsapp_session(
+                period.start_date, period.end_date
+            )
+            result = restrict_result_to_period(
+                result, period.start_date, period.end_date
+            )
+        except Exception as exc:
+            messagebox.showwarning("Leitura salva indisponível", str(exc))
+            return
+        self.review_html_path = None
+        self.review_period_key = None
+        self._show_whatsapp_result(result, period)
 
     def _run_whatsapp_probe(self, period: PeriodSelection) -> None:
         try:
@@ -476,12 +512,10 @@ class FechamentoApp(tk.Tk):
         except (ValueError, KeyError) as exc:
             messagebox.showwarning("Período inválido", str(exc))
             return
-        if (
-            self.review_html_path
-            and self.review_html_path.exists()
-            and self.review_period_key == selected_period.review_key
-        ):
-            os.startfile(str(self.review_html_path))
+        if self.review_window is not None and self.review_window.winfo_exists():
+            self.review_window.deiconify()
+            self.review_window.lift()
+            self.review_window.focus_force()
             return
         result = self.last_whatsapp_result
         if self.last_probe_period != selected_period:
@@ -554,47 +588,16 @@ class FechamentoApp(tk.Tk):
     ) -> None:
         self.status_var.set("Área temporária pronta para revisão")
         self._set_status("success")
-        self.review_button.configure(state="normal", text="Reabrir revisão temporária")
-        script = Path(__file__).resolve().parents[1] / "scripts" / "render_current_html_review.py"
-        try:
-            source_cache = (
-                Path(result.captured_attachments[0].path).parent
-                / "revisao_temporaria.json"
-            )
-            if not source_cache.exists():
-                raise OSError("O cache da leitura atual não foi localizado.")
-            python_exec = Path(sys.executable)
-            if python_exec.name.lower() == "pythonw.exe":
-                python_exec = python_exec.with_name("python.exe")
-            completed = subprocess.run(
-                [
-                    str(python_exec),
-                    str(script),
-                    "--source", str(source_cache),
-                    "--period-key", period.review_key,
-                ], capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=30,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=True,
-            )
-            output = Path(completed.stdout.strip().splitlines()[-1])
-            if output.exists():
-                self.review_html_path = output
-                self.review_period_key = period.review_key
-                os.startfile(str(output))
-                self.review_button.configure(state="normal", text="Reabrir revisão HTML")
-                self._set_details([
-                    "Revisão HTML criada no mesmo fluxo do aplicativo.",
-                    f"Período: {period.label}",
-                    f"Arquivo: {output}",
-                    "",
-                    "Revise as pendentes no navegador. Nenhum dado foi escrito na planilha.",
-                ])
-                return
-        except (OSError, subprocess.SubprocessError, IndexError) as exc:
-            self._set_details([f"Não foi possível abrir a revisão HTML: {exc}"])
-        # Do not reopen the legacy table window: the agreed review format is
-        # the HTML card view. The error remains visible in the main app.
-        self.review_button.configure(state="normal")
+        self.review_button.configure(state="normal", text="Reabrir revisão integrada")
+        self.review_window = ReviewWindow(
+            self, drafts, self.workbook_var.get().strip(), period
+        )
+        self._set_details([
+            "Revisão integrada aberta no próprio aplicativo.",
+            f"Período: {period.label}",
+            "Use o filtro Pendente para revisar apenas os campos incertos.",
+            "Depois, aprove os confirmados, consolide e importe com backup.",
+        ])
 
     def _test_stake_entry(self) -> None:
         try:
@@ -624,135 +627,199 @@ class FechamentoApp(tk.Tk):
 
 
 class ReviewWindow(tk.Toplevel):
-    COLUMNS = ("status", "data", "tipo", "obra", "peca", "dimensoes", "volume")
+    OPTIONS = (
+        "BLOCO", "ESTACA", "ESCADA", "MURO", "PAINEL", "PILAR", "VIGA",
+        "LAJE", "VIGA 15,56m ATÉ 25m", "VIGA 10,1m ATÉ 15,55m",
+        "VIGA 9m ATÉ 10m", "VIGA 6,1 ATÉ 8,9m", "VIGA ATÉ 6m",
+        "LAJE ALVEOLAR", "METRO CÚBICO", "VIGA TERÇA",
+    )
+    FIELDS = (
+        ("data da mensagem", "message_date"), ("obra", "work"),
+        ("produto", "product"), ("peça", "piece"),
+        ("seção", "section"), ("comprimento", "length"),
+        ("dimensão", "dimensions"), ("volume unitário", "unit_volume"),
+        ("tipo", "type_name"), ("quantidade", "quantity"),
+    )
 
     def __init__(self, parent: tk.Widget, drafts: list[LabelDraft], workbook_path: str, period: PeriodSelection) -> None:
         super().__init__(parent)
         self.title("Revisão temporária — Fechamento WL")
-        self.geometry("1180x560+55+45")
-        self.minsize(900, 430)
+        self.geometry("1180x720+45+20")
+        self.minsize(920, 620)
+        self.configure(bg=COLORS["background"])
         self.drafts = drafts
         self.workbook_path = workbook_path
         self.period = period
+        self.filter_name = "TODOS"
+        self.position = 0
+        self.filtered: list[int] = []
+        self.variables: dict[str, tk.StringVar] = {}
+        self.status_choice = tk.StringVar()
+        self.protocol("WM_DELETE_WINDOW", self._close)
 
-        tk.Label(
-            self,
-            text="Revisão temporária das etiquetas",
-            font=("Segoe UI", 17, "bold"),
-            fg=COLORS["navy"],
-        ).pack(anchor="w", padx=18, pady=(15, 2))
-        tk.Label(
-            self,
-            text="Aprove, edite ou rejeite. Nada será enviado à planilha nesta tela.",
-            font=("Segoe UI", 10),
-            fg=COLORS["muted"],
-        ).pack(anchor="w", padx=18, pady=(0, 10))
+        header = tk.Frame(self, bg=COLORS["background"])
+        header.pack(fill="x", padx=24, pady=(18, 8))
+        tk.Label(header, text="Revisão temporária do fechamento WL", bg=COLORS["background"], fg=COLORS["text"], font=("Segoe UI", 20, "bold")).pack(anchor="w")
+        self.summary = tk.Label(header, bg=COLORS["background"], fg=COLORS["text"], font=("Segoe UI", 10))
+        self.summary.pack(anchor="w", pady=(4, 8))
+        filters = tk.Frame(header, bg=COLORS["background"])
+        filters.pack(fill="x")
+        tk.Label(filters, text="Exibir:", bg=COLORS["background"], fg=COLORS["text"]).pack(side="left")
+        for name in ("TODOS", "PENDENTE", "CONFIRMADO", "APROVADO", "REJEITADO"):
+            ttk.Button(filters, text=name.title(), style="Secondary.TButton", command=lambda value=name: self._set_filter(value)).pack(side="left", padx=(7, 0))
 
-        frame = tk.Frame(self)
-        frame.pack(fill="both", expand=True, padx=18)
-        self.tree = ttk.Treeview(frame, columns=self.COLUMNS, show="headings", selectmode="browse")
-        headings = {
-            "status": "Situação", "data": "Data", "tipo": "Tipo", "obra": "Obra",
-            "peca": "Peça", "dimensoes": "Dimensões", "volume": "Vol. unit.",
-        }
-        widths = {"status": 145, "data": 90, "tipo": 150, "obra": 220, "peca": 90, "dimensoes": 180, "volume": 85}
-        for column in self.COLUMNS:
-            self.tree.heading(column, text=headings[column])
-            self.tree.column(column, width=widths[column], minwidth=65)
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        self.tree.bind("<Double-1>", lambda _event: self._edit_selected())
+        self.card = tk.Frame(self, bg=COLORS["card"], highlightthickness=2, highlightbackground=COLORS["amber"])
+        self.card.pack(fill="both", expand=True, padx=24, pady=10)
+        self.entry_title = tk.Label(self.card, bg=COLORS["card"], fg=COLORS["text"], font=("Segoe UI", 16, "bold"))
+        self.entry_title.grid(row=0, column=0, columnspan=4, sticky="w", padx=18, pady=(16, 4))
+        self.photo_button = ttk.Button(self.card, text="Abrir foto original", style="Secondary.TButton", command=self._open_photo)
+        self.photo_button.grid(row=1, column=0, sticky="w", padx=18, pady=4)
+        self.warning_label = tk.Label(self.card, bg=COLORS["card"], fg=COLORS["amber"], justify="left", wraplength=1040)
+        self.warning_label.grid(row=2, column=0, columnspan=4, sticky="w", padx=18, pady=(4, 10))
+        for column in range(4):
+            self.card.grid_columnconfigure(column, weight=1)
+        for offset, (label, attribute) in enumerate(self.FIELDS):
+            row, column = 3 + (offset // 4) * 2, offset % 4
+            tk.Label(self.card, text=label, bg=COLORS["card"], fg=COLORS["muted"], font=("Segoe UI", 9)).grid(row=row, column=column, sticky="sw", padx=10, pady=(6, 0))
+            variable = tk.StringVar()
+            self.variables[attribute] = variable
+            if attribute in {"product", "type_name"}:
+                widget = ttk.Combobox(self.card, textvariable=variable, values=self.OPTIONS, state="readonly")
+                other = "type_name" if attribute == "product" else "product"
+                widget.bind(
+                    "<<ComboboxSelected>>",
+                    lambda _event, source=attribute, target=other: self.variables[target].set(
+                        self.variables[source].get()
+                    ),
+                )
+            else:
+                widget = tk.Entry(self.card, textvariable=variable, relief="solid", bd=1, font=("Segoe UI", 10))
+            widget.grid(row=row + 1, column=column, sticky="ew", padx=10, pady=(2, 6), ipady=6)
+        status_row = 9
+        tk.Label(self.card, text="situação", bg=COLORS["card"], fg=COLORS["muted"], font=("Segoe UI", 9)).grid(row=status_row, column=0, sticky="sw", padx=10)
+        ttk.Combobox(self.card, textvariable=self.status_choice, values=("PENDENTE", "CONFIRMADO", "APROVADO", "REJEITADO"), state="readonly").grid(row=status_row + 1, column=0, sticky="ew", padx=10, pady=(2, 14), ipady=6)
 
-        actions = tk.Frame(self)
-        actions.pack(fill="x", padx=18, pady=14)
-        ttk.Button(actions, text="Aprovar", style="Primary.TButton", command=self._approve_selected).pack(side="left")
-        ttk.Button(actions, text="Editar", style="Secondary.TButton", command=self._edit_selected).pack(side="left", padx=8)
-        ttk.Button(actions, text="Rejeitar", style="Secondary.TButton", command=self._reject_selected).pack(side="left")
-        ttk.Button(actions, text="Consolidar aprovados", style="Primary.TButton", command=self._show_consolidated).pack(side="left", padx=18)
-        ttk.Button(actions, text="Fechar", style="Secondary.TButton", command=self.destroy).pack(side="right")
-        self._refresh()
+        navigation = tk.Frame(self, bg=COLORS["background"])
+        navigation.pack(fill="x", padx=24, pady=(0, 18))
+        ttk.Button(navigation, text="← Anterior", style="Secondary.TButton", command=lambda: self._move(-1)).pack(side="left")
+        self.counter = tk.Label(navigation, bg=COLORS["background"], fg=COLORS["text"], font=("Segoe UI", 10, "bold"))
+        self.counter.pack(side="left", padx=12)
+        ttk.Button(navigation, text="Próxima →", style="Secondary.TButton", command=lambda: self._move(1)).pack(side="left")
+        ttk.Button(navigation, text="Aprovar todos os confirmados", style="Secondary.TButton", command=self._approve_confirmed).pack(side="right", padx=(8, 0))
+        ttk.Button(navigation, text="Consolidar aprovados", style="Primary.TButton", command=self._show_consolidated).pack(side="right")
+        self._set_filter("PENDENTE" if any(self._display_status(item) == "PENDENTE" for item in drafts) else "TODOS")
 
-    def _refresh(self) -> None:
-        selected = self.tree.selection()
-        self.tree.delete(*self.tree.get_children())
-        for index, draft in enumerate(self.drafts):
-            volume = "" if draft.unit_volume is None else str(draft.unit_volume).replace(".", ",")
-            self.tree.insert("", "end", iid=str(index), values=(
-                draft.status, draft.message_date, draft.type_name, draft.work,
-                draft.piece, draft.dimensions, volume,
-            ))
-        if selected and self.tree.exists(selected[0]):
-            self.tree.selection_set(selected[0])
+    @staticmethod
+    def _display_status(draft: LabelDraft) -> str:
+        if draft.status in {"APROVADO", "REJEITADO", "CONFIRMADO"}:
+            return draft.status
+        return "PENDENTE" if draft.warnings or draft.status in {"CONFIRMAR", "PENDENTE"} else "CONFIRMADO"
 
-    def _selected(self) -> LabelDraft | None:
-        selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo("Selecione uma linha", "Selecione primeiro a etiqueta que deseja revisar.", parent=self)
-            return None
-        return self.drafts[int(selection[0])]
+    def _set_filter(self, name: str) -> None:
+        self._save_current(silent=True)
+        self.filter_name = name
+        self.filtered = [index for index, draft in enumerate(self.drafts) if name == "TODOS" or self._display_status(draft) == name]
+        self.position = 0
+        self._load_current()
 
-    def _approve_selected(self) -> None:
-        draft = self._selected()
-        if draft is None:
+    def _load_current(self) -> None:
+        counts = {name: sum(self._display_status(item) == name for item in self.drafts) for name in ("PENDENTE", "CONFIRMADO", "APROVADO", "REJEITADO")}
+        self.summary.configure(text=f"{len(self.drafts)} entradas · {counts['PENDENTE']} pendentes · {counts['CONFIRMADO']} confirmadas · {counts['APROVADO']} aprovadas")
+        if not self.filtered:
+            self.entry_title.configure(text=f"Nenhuma entrada em {self.filter_name.title()}")
+            self.warning_label.configure(text="Escolha outro filtro.")
+            self.counter.configure(text="0 de 0")
             return
-        if draft.warnings:
-            messagebox.showwarning(
-                "Há campos para confirmar",
-                "Edite os campos indicados antes de aprovar:\n\n" + "\n".join(draft.warnings),
-                parent=self,
-            )
-            return
-        draft.status = "APROVADO"
-        self._refresh()
-
-    def _reject_selected(self) -> None:
-        draft = self._selected()
-        if draft is None:
-            return
-        draft.status = "REJEITADO"
-        self._refresh()
-
-    def _edit_selected(self) -> None:
-        draft = self._selected()
-        if draft is None:
-            return
-        editor = tk.Toplevel(self)
-        editor.title("Editar dados da etiqueta")
-        editor.transient(self)
-        editor.grab_set()
-        fields = (
-            ("Data", "message_date"), ("Tipo", "type_name"), ("Obra", "work"),
-            ("Produto", "product"), ("Peça", "piece"), ("Dimensões", "dimensions"),
-            ("Volume unitário", "unit_volume"),
-        )
-        variables: dict[str, tk.StringVar] = {}
-        for row, (label, attribute) in enumerate(fields):
-            tk.Label(editor, text=label, font=("Segoe UI", 9, "bold")).grid(row=row, column=0, sticky="w", padx=14, pady=6)
+        self.position = max(0, min(self.position, len(self.filtered) - 1))
+        index = self.filtered[self.position]
+        draft = self.drafts[index]
+        if draft.type_name:
+            draft.product = draft.type_name
+        self.entry_title.configure(text=f"Entrada {index + 1}")
+        self.warning_label.configure(text=" · ".join(draft.warnings) if draft.warnings else "Sem alerta automático")
+        for _, attribute in self.FIELDS:
             value = getattr(draft, attribute)
-            variables[attribute] = tk.StringVar(value="" if value is None else str(value).replace(".", ","))
-            tk.Entry(editor, textvariable=variables[attribute], width=55).grid(row=row, column=1, padx=14, pady=6)
+            if attribute in {"unit_volume", "quantity"} and value is not None:
+                value = str(value).replace(".", ",")
+            self.variables[attribute].set("" if value is None else str(value))
+        self.status_choice.set(self._display_status(draft))
+        self.counter.configure(text=f"{self.position + 1} de {len(self.filtered)} no filtro")
 
-        def save() -> None:
-            volume_text = variables["unit_volume"].get().strip()
-            try:
-                volume = float(volume_text.replace(",", ".")) if volume_text else None
-            except ValueError:
-                messagebox.showwarning("Volume inválido", "Informe o volume com números e vírgula.", parent=editor)
-                return
-            for attribute in ("message_date", "type_name", "work", "product", "piece", "dimensions"):
-                setattr(draft, attribute, variables[attribute].get().strip())
-            draft.unit_volume = volume
-            required = (draft.message_date, draft.type_name, draft.work, draft.piece, draft.dimensions, draft.unit_volume)
-            draft.warnings = [] if all(value not in ("", None) for value in required) else ["Ainda há campos obrigatórios vazios"]
-            draft.status = "PRONTO PARA REVISÃO" if not draft.warnings else "CONFIRMAR"
-            editor.destroy()
-            self._refresh()
+    def _save_current(self, silent: bool = False) -> bool:
+        if not self.filtered:
+            return True
+        draft = self.drafts[self.filtered[self.position]]
+        try:
+            volume_text = self.variables["unit_volume"].get().strip()
+            quantity_text = self.variables["quantity"].get().strip()
+            draft.unit_volume = float(volume_text.replace(",", ".")) if volume_text else None
+            quantity = float(quantity_text.replace(",", ".")) if quantity_text else 1
+            draft.quantity = int(quantity) if quantity.is_integer() else quantity
+        except ValueError:
+            if not silent:
+                messagebox.showwarning("Número inválido", "Revise quantidade e volume unitário.", parent=self)
+            return False
+        for _, attribute in self.FIELDS:
+            if attribute not in {"unit_volume", "quantity"}:
+                setattr(draft, attribute, self.variables[attribute].get().strip())
+        selected = self.status_choice.get() or self._display_status(draft)
+        draft.status = selected
+        if selected in {"CONFIRMADO", "APROVADO"}:
+            draft.warnings = []
+        self._persist()
+        return True
 
-        ttk.Button(editor, text="Salvar correção", style="Primary.TButton", command=save).grid(row=len(fields), column=1, sticky="e", padx=14, pady=14)
+    def _persist(self) -> None:
+        if not self.drafts:
+            return
+        cache_path = Path(self.drafts[0].source_path).parent / "revisao_temporaria.json"
+        if not cache_path.exists():
+            return
+        try:
+            loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+            replacements = {(item.message_id, item.source_path): asdict(item) for item in self.drafts}
+            for group in loaded.values():
+                if not isinstance(group, list):
+                    continue
+                for index, row in enumerate(group):
+                    key = (str(row.get("message_id") or ""), str(row.get("source_path") or ""))
+                    if key in replacements:
+                        group[index] = replacements[key]
+            temporary = cache_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(loaded, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(cache_path)
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _move(self, step: int) -> None:
+        if not self._save_current():
+            return
+        self.position = max(0, min(self.position + step, len(self.filtered) - 1)) if self.filtered else 0
+        self._load_current()
+
+    def _open_photo(self) -> None:
+        if self.filtered:
+            os.startfile(self.drafts[self.filtered[self.position]].source_path)
+
+    def _approve_confirmed(self) -> None:
+        self._save_current(silent=True)
+        changed = 0
+        for draft in self.drafts:
+            if self._display_status(draft) == "CONFIRMADO":
+                draft.status = "APROVADO"
+                draft.warnings = []
+                changed += 1
+        self._persist()
+        messagebox.showinfo("Aprovação concluída", f"{changed} entrada(s) confirmada(s) foram aprovadas.", parent=self)
+        self._set_filter(self.filter_name)
+
+    def _close(self) -> None:
+        self._save_current(silent=True)
+        self.destroy()
 
     def _show_consolidated(self) -> None:
+        if not self._save_current():
+            return
         rows = group_approved_drafts(self.drafts)
         if not rows:
             messagebox.showinfo(

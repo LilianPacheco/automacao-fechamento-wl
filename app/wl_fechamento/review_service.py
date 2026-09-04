@@ -11,10 +11,12 @@ from .label_parser import LabelDraft, normalize_type, parse_document_text
 from .ocr_service import read_image_texts
 from .paddle_ocr_service import is_available as paddle_available
 from .vision_service import (
+    VISION_PIPELINE_VERSION,
     VisionAnalysis,
     analyze_image,
     apply_group_context,
     decide_fields,
+    enrich_isolated_fields_batch,
 )
 from .whatsapp_service import WhatsAppProbeResult
 
@@ -321,6 +323,8 @@ def _apply_message_consensus(drafts: list[LabelDraft]) -> None:
         except ValueError:
             length = None
         draft.type_name = normalize_type(draft.work, draft.product, length) if draft.product else ""
+        if draft.type_name:
+            draft.product = draft.type_name
         draft.dimensions = " ".join(item for item in (draft.section, draft.length) if item)
         resolved = {
             "Confirmar obra": bool(draft.work),
@@ -399,7 +403,7 @@ def _vision_analysis_to_draft(
         message_date=_message_date(result, message_id),
         source_path=analysis.source_path,
         work=str(values.get("work") or ""),
-        product=str(values.get("product") or ""),
+        product=analysis.product_type or str(values.get("product") or ""),
         type_name=analysis.product_type,
         piece=str(values.get("piece") or ""),
         section=str(values.get("section") or ""),
@@ -435,7 +439,14 @@ def _structured_document_drafts(
             message_date=_message_date(result, message_id),
             source_path=analysis.source_path,
         )
-        if len(parsed) > 1:
+        plain_text = reading.text.upper()
+        is_stake_delivery = (
+            len(parsed) == 1
+            and parsed[0].product == "ESTACA"
+            and "QUANTIDADE" in plain_text
+            and "METROS" in plain_text
+        )
+        if len(parsed) > 1 or is_stake_delivery:
             _apply_message_quantity(parsed, result, message_id)
             alternatives.append(parsed)
     return max(alternatives, key=len) if alternatives else []
@@ -472,7 +483,12 @@ def build_advanced_review_drafts(
         if analysis_path.exists():
             try:
                 payload = json.loads(analysis_path.read_text(encoding="utf-8"))
-                if str(payload.get("source_path") or "") == attachment.path:
+                if (
+                    str(payload.get("source_path") or "") == attachment.path
+                    # Version 6 changes interpretation rules, not OCR pixels;
+                    # version-5 readings can be safely reinterpreted instantly.
+                    and int(payload.get("pipeline_version") or 0) >= 5
+                ):
                     analysis = VisionAnalysis.from_dict(payload)
             except (OSError, json.JSONDecodeError, KeyError, TypeError):
                 analysis = None
@@ -491,9 +507,12 @@ def build_advanced_review_drafts(
                 )
         processed.append((attachment, analysis, analysis_path))
 
-    apply_group_context([analysis for _, analysis, _ in processed])
+    analyses = [analysis for _, analysis, _ in processed]
+    enrich_isolated_fields_batch(analyses)
+    apply_group_context(analyses)
     drafts: list[LabelDraft] = []
     review_cache: dict[str, list[dict]] = {}
+    cache_key_by_path: dict[str, str] = {}
     for attachment, analysis, analysis_path in processed:
         if attachment.path not in failures:
             analysis.save(analysis_path)
@@ -512,7 +531,16 @@ def build_advanced_review_drafts(
                 draft.status = "CONFIRMAR"
         drafts.extend(image_drafts)
         cache_key = f"{attachment.message_id}:{attachment.sha256}"
-        review_cache[cache_key] = [asdict(item) for item in image_drafts]
+        cache_key_by_path[attachment.path] = cache_key
+
+    # Apply the conservative repeated-piece and message consensus already
+    # used by the legacy reader. It fills only conflict-free values supported
+    # by multiple photos and never overwrites a populated measurement.
+    _apply_message_consensus(drafts)
+    for draft in drafts:
+        cache_key = cache_key_by_path.get(draft.source_path)
+        if cache_key:
+            review_cache.setdefault(cache_key, []).append(asdict(draft))
 
     cache_path = capture_dir / "revisao_temporaria.json"
     temporary = cache_path.with_suffix(".tmp")

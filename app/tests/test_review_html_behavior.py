@@ -41,7 +41,30 @@ class ReviewHtmlBehaviorTests(unittest.TestCase):
             manifest["content_scripts"][0]["js"],
             ["quantity.js", "content_v185.js"],
         )
-        self.assertEqual(manifest["version"], "1.8.14")
+        self.assertEqual(manifest["version"], "1.8.25")
+
+    def test_reader_opens_current_whatsapp_search_variants(self) -> None:
+        reader = (
+            Path(__file__).resolve().parents[1]
+            / "chrome_extension"
+            / "content_v185.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('input[role="searchbox"]', reader)
+        self.assertIn('input[placeholder*="Search" i]', reader)
+        self.assertIn('icon.includes("chat-list-search")', reader)
+        self.assertIn('Object.getOwnPropertyDescriptor(prototype, "value")', reader)
+        self.assertIn('header.querySelectorAll("[title], [aria-label]")', reader)
+        self.assertIn('[data-testid="chat-list"]', reader)
+        self.assertIn('[data-lexical-editor="true"]', reader)
+        self.assertIn("const domSummary = () =>", reader)
+        self.assertIn("isOnlyChatListInput", reader)
+        self.assertIn('key: "ArrowDown"', reader)
+        self.assertIn("WL_TRUSTED_TEXT", reader)
+        self.assertIn("rect.width >= 80", reader)
+        self.assertIn("function wlRequestTrustedPoint", reader)
+        self.assertIn("function wlRewindViewer", reader)
+        self.assertIn("const directCounts = new Map()", reader)
 
     def test_reader_reacquires_calendar_after_changing_month(self) -> None:
         reader = (
@@ -56,8 +79,10 @@ class ReviewHtmlBehaviorTests(unittest.TestCase):
         self.assertIn('label.includes(desiredDate) || label === day', reader)
         self.assertIn('dia alcançado sem mensagens', reader)
         self.assertIn("calendar_dates_reached: calendarDatesReached", reader)
-        self.assertIn("period_scan_complete: Boolean(periodLabels.length)", reader)
+        self.assertIn("period_scan_complete: continuousPeriodCovered", reader)
         self.assertIn("Leitura incompleta: nem todos os dias", reader)
+        self.assertIn("function wlVisibleChronologyDates(panel)", reader)
+        self.assertIn("continuousPeriodCovered || (", reader)
 
     def test_only_situation_select_changes_card_status(self) -> None:
         script = (

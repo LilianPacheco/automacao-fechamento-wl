@@ -297,7 +297,7 @@ def _single_explicit_piece(text: str) -> str:
     candidates = {
         re.sub(r"\s+", "", item)
         for item in re.findall(
-            r"\b(?:PL|PM|VPT|VPR|VRT|VCR|VOL|VL|VR|VP|PP|PH|PA|MA|BL)"
+            r"\b(?:PL|PM|VPT|VPR|VRT|VCR|VOL|VL|VR|VP|PP|PH|PA|MA|BL|EP)"
             r"[-_]?\s*\d{1,4}[A-Z]?(?:[-_][A-Z0-9]+)?\b",
             normalized,
         )
@@ -305,7 +305,7 @@ def _single_explicit_piece(text: str) -> str:
     if not candidates:
         # Repair I/O/L only inside the numeric suffix of a known piece code.
         noisy = re.findall(
-            r"\b(?:PL|PM|VPT|VPR|VRT|VCR|VOL|VL|VR|VP|PP|PH|PA|MA|BL)"
+            r"\b(?:PL|PM|VPT|VPR|VRT|VCR|VOL|VL|VR|VP|PP|PH|PA|MA|BL|EP)"
             r"[-_]\s*[0-9IOL]{1,4}(?:[-_][A-Z0-9]+)?\b",
             normalized,
         )
@@ -615,7 +615,7 @@ def parse_label_text(
         message_date=message_date,
         source_path=source_path,
         work=work,
-        product=product,
+        product=type_name or product,
         type_name=type_name,
         piece=piece,
         section=section,
@@ -749,7 +749,7 @@ def parse_romaneio_text(
             message_date=message_date,
             source_path=source_path,
             work=work,
-            product=product,
+            product=type_name or product,
             type_name=type_name,
             piece=piece,
             section=section,
@@ -778,8 +778,9 @@ def _parse_stake_delivery_text(
     unit volume intentionally remain blank.
     """
     plain = _plain(text).upper()
-    required_markers = ("ESTACA", "DIMENSAO", "QUANTIDADE", "METROS")
-    if not all(marker in plain for marker in required_markers):
+    has_stake = bool(re.search(r"\b(?:E?STACA|STACA)\b", plain))
+    required_markers = ("QUANTIDADE", "METROS")
+    if not has_stake or not all(marker in plain for marker in required_markers):
         return []
 
     work_match = re.search(
@@ -787,6 +788,15 @@ def _parse_stake_delivery_text(
         plain,
     )
     work = _clean(work_match.group(1)) if work_match else ""
+    if not work:
+        # Some delivery notes put the customer on the same line as ``OBRA``
+        # and the city on the next one, without a CAMINHÃO marker nearby.
+        # Keeping this fallback line-bounded avoids swallowing the whole OCR.
+        line_match = re.search(r"(?:^|[\r\n])\s*OBRA\s*:?\s*([^\r\n]+)", text, re.IGNORECASE)
+        if line_match:
+            candidate = _clean(line_match.group(1))
+            if candidate and len(candidate) <= 100:
+                work = candidate
 
     dimensions = re.findall(r"\b\d{1,3}\s*[X×]\s*\d{1,3}\b", plain)
     dimension = ""
@@ -794,19 +804,19 @@ def _parse_stake_delivery_text(
         normalized = [re.sub(r"\s*[X×]\s*", "X", value) for value in dimensions]
         dimension = Counter(normalized).most_common(1)[0][0]
 
-    meters_area = plain.split("METROS", 1)[1]
-    meters_area = re.split(r"\bPESO\b", meters_area, maxsplit=1)[0]
-    meter_tokens = re.findall(r"\b\d+(?:[.,]\d+)?\b", meters_area)
-    meter_values = [float(token.replace(",", ".")) for token in meter_tokens]
+    # OCR may flatten the table by columns in different orders.  Remove dates
+    # and the delivery-note number, then use the largest standalone integer:
+    # row lengths/quantities are smaller and the yellow total in `Metros` is
+    # the largest integer (e.g. 32 + 20 -> 52). Decimal weights are excluded.
+    numeric_area = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", " ", plain)
+    numeric_area = re.sub(r"\b(?:N|NO|NRO)\s*[.:\u00ba-]?\s*\d{3,}\b", " ", numeric_area)
+    meter_values = [
+        int(token) for token in re.findall(r"(?<![X\d.,])\b\d{1,3}\b(?![X\d.,])", numeric_area)
+        if 0 < int(token) <= 1000
+    ]
     total_meters: int | float | None = None
     if meter_values:
-        # The yellow total row normally repeats the sum as the final number
-        # (e.g. 32 + 20 = 52). If OCR misses that row, sum the visible rows.
-        if len(meter_values) >= 2 and abs(meter_values[-1] - sum(meter_values[:-1])) < 0.001:
-            total = meter_values[-1]
-        else:
-            total = sum(meter_values)
-        total_meters = int(total) if total.is_integer() else round(total, 3)
+        total_meters = max(meter_values)
 
     warnings: list[str] = []
     for label, value in (

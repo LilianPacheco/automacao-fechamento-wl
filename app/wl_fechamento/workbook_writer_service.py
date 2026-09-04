@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import json
-import math
 import re
-import subprocess
-import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,13 +9,6 @@ from pathlib import Path
 from .grouping_service import ConsolidatedRow
 from .models import PeriodSelection
 from .workbook_service import create_backup, validate_workbook
-
-
-NODE_EXECUTABLE = Path(
-    r"C:\Users\lilia\.cache\codex-runtimes\codex-primary-runtime"
-    r"\dependencies\node\bin\node.exe"
-)
-WRITER_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "write_approved_rows.mjs"
 
 
 @dataclass(frozen=True)
@@ -138,68 +127,25 @@ def write_approved_rows(
     validation = validate_workbook(source, period)
     if not validation.valid:
         raise RuntimeError("A planilha deixou de ser válida; nenhuma escrita foi feita.")
-    if not NODE_EXECUTABLE.exists() or not WRITER_SCRIPT.exists():
-        raise RuntimeError("O componente seguro de escrita da planilha não foi localizado.")
-
     backup = create_backup(source)
     temporary_output = source.with_name(f".{source.stem}.wl-{uuid.uuid4().hex}.xlsx")
-    with tempfile.TemporaryDirectory(prefix="wl_writer_") as temporary:
-        config_path = Path(temporary) / "write_config.json"
-        config_path.write_text(json.dumps({
-            "input_path": str(source),
-            "output_path": str(temporary_output),
-            "sheet_name": period.sheet_name,
-            "header_row": int(validation.details["header_row"]),
-            "rows": rows_to_payload(rows),
-        }, ensure_ascii=False), encoding="utf-8")
-        completed = subprocess.run(
-            [str(NODE_EXECUTABLE), str(WRITER_SCRIPT), str(config_path)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=300,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            check=False,
+    try:
+        imported_rows = _fallback_openpyxl_write(
+            source,
+            temporary_output,
+            period,
+            rows,
+            int(validation.details["header_row"]),
         )
-
-    result_data: dict[str, object] | None = None
-    for line in reversed(completed.stdout.splitlines()):
-        try:
-            candidate = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, dict) and candidate.get("ok") is True:
-            result_data = candidate
-            break
-    if result_data is None or not temporary_output.exists():
+        prepared_validation = validate_workbook(temporary_output, period)
+    except Exception:
         temporary_output.unlink(missing_ok=True)
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(detail or "A cópia segura não pôde ser gerada.")
-
-    # The JS exporter is preferred, but some Excel workbooks lose their
-    # metadata on round-trip. Never promote an output that the app cannot
-    # validate; regenerate the temporary copy through the safe fallback.
-    exported_validation = validate_workbook(temporary_output, period)
-    if not exported_validation.valid:
+        raise
+    if not prepared_validation.valid:
         temporary_output.unlink(missing_ok=True)
-        try:
-            imported_rows = _fallback_openpyxl_write(
-                source, temporary_output, period, rows, int(validation.details["header_row"])
-            )
-        except Exception as exc:
-            temporary_output.unlink(missing_ok=True)
-            raise RuntimeError(
-                "A cópia exportada não passou na validação e o caminho seguro de recuperação falhou: "
-                f"{exc}"
-            ) from exc
-        fallback_validation = validate_workbook(temporary_output, period)
-        if not fallback_validation.valid:
-            temporary_output.unlink(missing_ok=True)
-            raise RuntimeError(
-                "A cópia preparada não passou na validação. O arquivo oficial não foi alterado."
-            )
-        result_data = {"imported": [{"target_row": row} for row in imported_rows]}
+        raise RuntimeError(
+            "A cópia preparada não passou na validação. O arquivo oficial não foi alterado."
+        )
 
     try:
         temporary_output.replace(source)
@@ -208,10 +154,4 @@ def write_approved_rows(
             "A cópia foi preparada, mas o arquivo está aberto no Excel. "
             "Feche a planilha e tente novamente; o backup foi preservado."
         ) from exc
-    imported = result_data.get("imported", [])
-    imported_rows = [
-        int(item["target_row"])
-        for item in imported
-        if isinstance(item, dict) and "target_row" in item
-    ]
     return WorkbookWriteResult(source, backup, imported_rows)
