@@ -66,6 +66,40 @@ class LocalEvidenceImportTests(unittest.TestCase):
             self.assertEqual(result.evidences[0].message_date, "20/08/2026")
             self.assertEqual(result.group_name, "Pasta ou ZIP local")
 
+    def test_zip_without_media_explains_that_images_were_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "sem_fotos.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr(
+                    "chat.txt",
+                    "[8/17/26, 8:06:33 AM] Ana: <imagem ocultada>",
+                )
+            with self.assertRaisesRegex(RuntimeError, "exportado sem as fotos"):
+                import_local_evidence(
+                    archive,
+                    date(2026, 8, 16),
+                    date(2026, 8, 31),
+                    root / "capturas",
+                )
+
+    def test_folder_containing_one_zip_is_opened_automatically(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "pasta"
+            source.mkdir()
+            image = root / "IMG-20260820-WA0004.jpg"
+            Image.new("RGB", (40, 40), "orange").save(image)
+            with zipfile.ZipFile(source / "grupo.zip", "w") as zipped:
+                zipped.write(image, image.name)
+            result = import_local_evidence(
+                source,
+                date(2026, 8, 16),
+                date(2026, 8, 31),
+                root / "capturas",
+            )
+            self.assertEqual(len(result.captured_attachments), 1)
+
     def test_reuses_metadata_from_previous_saved_capture_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

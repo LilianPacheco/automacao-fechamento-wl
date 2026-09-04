@@ -128,6 +128,18 @@ def import_local_evidence(
         else:
             scan_root = source_path
 
+        loose_images = [
+            path for path in scan_root.rglob("*")
+            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+        ]
+        if source_path.is_dir() and not loose_images:
+            nested_archives = sorted(scan_root.glob("*.zip"))
+            if len(nested_archives) == 1:
+                extracted = Path(temporary) / "zip_da_pasta"
+                extracted.mkdir()
+                _safe_extract(nested_archives[0], extracted)
+                scan_root = extracted
+
         images = sorted(
             path for path in scan_root.rglob("*")
             if path.is_file()
@@ -138,7 +150,25 @@ def import_local_evidence(
             )
         )
         if not images:
-            raise RuntimeError("Nenhuma foto JPG, PNG ou WEBP foi encontrada.")
+            text_preview = ""
+            for text_path in sorted(scan_root.rglob("*.txt"))[:3]:
+                try:
+                    text_preview += text_path.read_text(
+                        encoding="utf-8-sig", errors="replace"
+                    ).casefold()
+                except OSError:
+                    continue
+            if "imagem ocultada" in text_preview or "image omitted" in text_preview:
+                raise RuntimeError(
+                    "O arquivo foi exportado sem as fotos: ele contém apenas o texto "
+                    "da conversa e marca as mídias como 'imagem ocultada'. Exporte "
+                    "novamente escolhendo 'Incluir mídia' ou selecione uma pasta que "
+                    "contenha as fotos JPG/PNG."
+                )
+            raise RuntimeError(
+                "Nenhuma foto JPG, PNG ou WEBP foi encontrada. Se a pasta contém um "
+                "ZIP, escolha 'Sim' e selecione o próprio arquivo ZIP."
+            )
 
         text_files = sorted(path for path in scan_root.rglob("*.txt") if path.is_file())
         messages: list[ExportedMessage] = []
