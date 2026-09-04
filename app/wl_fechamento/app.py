@@ -16,6 +16,7 @@ from .chrome_bridge import (
 )
 from .models import MONTH_NAMES, MONTH_NUMBERS, AppConfiguration, PeriodSelection
 from .label_parser import LabelDraft
+from .local_import_service import import_local_evidence
 from .grouping_service import ConsolidatedRow, group_approved_drafts
 from .review_service import build_advanced_review_drafts
 from .workbook_writer_service import write_approved_rows
@@ -217,6 +218,14 @@ class FechamentoApp(tk.Tk):
             command=self._start_whatsapp_probe,
         )
         self.next_button.pack(fill="x", pady=(12, 0))
+        self.local_import_button = ttk.Button(
+            content,
+            text="Importar fotos sem abrir o WhatsApp",
+            style="Primary.TButton",
+            state="disabled",
+            command=self._select_local_evidence,
+        )
+        self.local_import_button.pack(fill="x", pady=(8, 0))
         self.saved_read_button = ttk.Button(
             content,
             text="Usar última leitura salva desta quinzena",
@@ -302,6 +311,7 @@ class FechamentoApp(tk.Tk):
             self.status_var.set("Configuração válida")
             self._set_status("success")
             self.next_button.configure(state="normal")
+            self.local_import_button.configure(state="normal")
             self.saved_read_button.configure(state="normal")
             details.append("")
             details.append("✓ Localização memorizada para a próxima execução.")
@@ -310,6 +320,7 @@ class FechamentoApp(tk.Tk):
             self.status_var.set("Configuração precisa de correção")
             self._set_status("error")
             self.next_button.configure(state="disabled")
+            self.local_import_button.configure(state="disabled")
             self.saved_read_button.configure(state="disabled")
             details.append("")
             details.append("A planilha não foi configurada. Corrija os itens acima.")
@@ -365,6 +376,66 @@ class FechamentoApp(tk.Tk):
         self.review_html_path = None
         self.review_period_key = None
         self._show_whatsapp_result(result, period)
+
+    def _select_local_evidence(self) -> None:
+        choice = messagebox.askyesnocancel(
+            "Escolher evidências",
+            "As evidências estão em um ZIP exportado pelo WhatsApp?\n\n"
+            "Sim: escolher um ZIP.\nNão: escolher uma pasta de fotos.",
+            parent=self,
+        )
+        if choice is None:
+            return
+        if choice:
+            selected = filedialog.askopenfilename(
+                title="Escolha o ZIP exportado pelo WhatsApp",
+                filetypes=[("Arquivo ZIP", "*.zip")],
+            )
+        else:
+            selected = filedialog.askdirectory(
+                title="Escolha a pasta que contém as fotos da quinzena"
+            )
+        if not selected:
+            return
+        try:
+            period = self._period()
+        except (ValueError, KeyError) as exc:
+            messagebox.showwarning("Período inválido", str(exc), parent=self)
+            return
+        self.local_import_button.configure(state="disabled")
+        self.status_var.set("Copiando evidências locais…")
+        self._set_status("warning")
+        self._set_details([
+            f"• Fonte: {selected}",
+            f"• Período escolhido: {period.label}",
+            "• As fotos serão copiadas para a área segura do aplicativo.",
+            "• O WhatsApp e a planilha não serão alterados.",
+        ])
+        threading.Thread(
+            target=self._run_local_import,
+            args=(selected, period),
+            daemon=True,
+        ).start()
+
+    def _run_local_import(self, selected: str, period: PeriodSelection) -> None:
+        try:
+            result = import_local_evidence(
+                selected, period.start_date, period.end_date
+            )
+        except Exception as exc:
+            error = str(exc)
+            self.after(0, lambda: self._show_local_import_error(error))
+            return
+        self.after(0, lambda: self._show_whatsapp_result(result, period))
+
+    def _show_local_import_error(self, error: str) -> None:
+        self.local_import_button.configure(state="normal")
+        self.status_var.set("Não foi possível importar as fotos")
+        self._set_status("error")
+        self._set_details([
+            f"Motivo: {error}",
+            "Nenhuma mensagem e nenhum dado da planilha foram alterados.",
+        ])
 
     def _run_whatsapp_probe(self, period: PeriodSelection) -> None:
         try:
@@ -433,12 +504,16 @@ class FechamentoApp(tk.Tk):
         if result.evidence_truncated:
             evidence_lines.append("  ⚠ O inventário atingiu o limite de segurança.")
 
-        first_evidence_date = ""
-        if result.evidences:
-            first_evidence_date = min(
-                result.evidences,
-                key=lambda item: datetime.strptime(item.message_date, "%d/%m/%Y"),
-            ).message_date
+        valid_evidence_dates = []
+        for evidence in result.evidences:
+            try:
+                valid_evidence_dates.append((
+                    datetime.strptime(evidence.message_date, "%d/%m/%Y"),
+                    evidence.message_date,
+                ))
+            except ValueError:
+                continue
+        first_evidence_date = min(valid_evidence_dates)[1] if valid_evidence_dates else ""
         configured_start = period.start_date.strftime("%d/%m/%Y")
         if (
             result.start_date_found
@@ -455,9 +530,18 @@ class FechamentoApp(tk.Tk):
                 f"{'encontrada' if result.start_date_found else 'não encontrada'}"
             )
 
+        local_source = result.group_name == "Pasta ou ZIP local"
         details = [
-            f"• Conexão: {'OK' if result.connected else 'não'}",
-            f"• Grupo correto: {'OK' if result.group_found else 'não encontrado'}",
+            (
+                "• Fonte local: OK"
+                if local_source
+                else f"• Conexão: {'OK' if result.connected else 'não'}"
+            ),
+            (
+                "• WhatsApp Web: não utilizado"
+                if local_source
+                else f"• Grupo correto: {'OK' if result.group_found else 'não encontrado'}"
+            ),
             (
                 "• Cobertura da quinzena: "
                 f"{'completa' if result.period_scan_complete else 'incompleta'}"
@@ -484,6 +568,7 @@ class FechamentoApp(tk.Tk):
         ]
         self._set_details(details)
         self.next_button.configure(state="normal", text="Atualizar leitura das evidências")
+        self.local_import_button.configure(state="normal")
         if (
             result.period_scan_complete
             and result.start_date_found

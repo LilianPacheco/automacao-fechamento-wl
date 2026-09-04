@@ -6,6 +6,10 @@ O fluxo mínimo está integrado e testado de ponta a ponta em cópia: seleção 
 quinzena, recuperação da captura correta, leitura visual, revisão por situação,
 consolidação de aprovados, backup e escrita no Excel.
 
+A coleta pelo WhatsApp Web deixou de ser obrigatória. A versão 0.4.0 também
+aceita pasta de fotos e ZIP exportado, preservando os metadados encontrados no
+arquivo de conversa e enviando datas não comprovadas para revisão.
+
 ## Evidências
 
 - A captura completa da 2ª quinzena de agosto contém 80 mensagens de evidência,
@@ -17,7 +21,7 @@ consolidação de aprovados, backup e escrita no Excel.
 - Produto e tipo usam as opções oficiais, incluindo todas as faixas de viga.
 - A importação criou backup e escreveu uma linha controlada na linha 245 da cópia,
   preservando as fórmulas das colunas calculadas.
-- A suíte automatizada terminou com 75 testes aprovados.
+- A suíte automatizada terminou com 79 testes aprovados.
 
 ## Limite conhecido
 
