@@ -220,7 +220,7 @@ class FechamentoApp(tk.Tk):
         self.next_button.pack(fill="x", pady=(12, 0))
         self.local_import_button = ttk.Button(
             content,
-            text="Importar fotos sem abrir o WhatsApp",
+            text="Importar ZIP do WhatsApp",
             style="Primary.TButton",
             state="disabled",
             command=self._select_local_evidence,
@@ -378,23 +378,10 @@ class FechamentoApp(tk.Tk):
         self._show_whatsapp_result(result, period)
 
     def _select_local_evidence(self) -> None:
-        choice = messagebox.askyesnocancel(
-            "Escolher evidências",
-            "As evidências estão em um ZIP exportado pelo WhatsApp?\n\n"
-            "Sim: escolher um ZIP.\nNão: escolher uma pasta de fotos.",
-            parent=self,
+        selected = filedialog.askopenfilename(
+            title="Escolha o ZIP exportado pelo WhatsApp com as mídias",
+            filetypes=[("Arquivo ZIP", "*.zip")],
         )
-        if choice is None:
-            return
-        if choice:
-            selected = filedialog.askopenfilename(
-                title="Escolha o ZIP exportado pelo WhatsApp",
-                filetypes=[("Arquivo ZIP", "*.zip")],
-            )
-        else:
-            selected = filedialog.askdirectory(
-                title="Escolha a pasta que contém as fotos da quinzena"
-            )
         if not selected:
             return
         try:
@@ -406,9 +393,9 @@ class FechamentoApp(tk.Tk):
         self.status_var.set("Copiando evidências locais…")
         self._set_status("warning")
         self._set_details([
-            f"• Fonte: {selected}",
+            f"• ZIP selecionado: {selected}",
             f"• Período escolhido: {period.label}",
-            "• As fotos serão copiadas para a área segura do aplicativo.",
+            "• O conteúdo do ZIP será validado antes da análise.",
             "• O WhatsApp e a planilha não serão alterados.",
         ])
         threading.Thread(
@@ -578,7 +565,7 @@ class FechamentoApp(tk.Tk):
             self.review_button.configure(state="normal")
             # Open the temporary review automatically when the read produced
             # period evidence; the button remains available for reopening it.
-            if result.evidences:
+            if result.evidences and not local_source:
                 self.after(350, self._start_photo_review)
         elif not result.period_scan_complete:
             self.review_button.configure(

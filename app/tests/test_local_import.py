@@ -25,6 +25,13 @@ class LocalEvidenceImportTests(unittest.TestCase):
         self.assertEqual(messages[0].message_date, "17/08/2026")
         self.assertEqual(messages[1].sender, "Bruno")
 
+    def test_parses_us_date_and_am_pm_export_format(self) -> None:
+        messages = parse_exported_chat(
+            "[8/17/26, 1:56:46 PM] Thiago Borba - AWL: foto.jpg"
+        )
+        self.assertEqual(messages[0].message_date, "17/08/2026")
+        self.assertEqual(messages[0].message_time, "13:56")
+
     def test_imports_folder_and_associates_chat_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -75,7 +82,7 @@ class LocalEvidenceImportTests(unittest.TestCase):
                     "chat.txt",
                     "[8/17/26, 8:06:33 AM] Ana: <imagem ocultada>",
                 )
-            with self.assertRaisesRegex(RuntimeError, "exportado sem as fotos"):
+            with self.assertRaisesRegex(RuntimeError, "1 arquivo.*0 fotos"):
                 import_local_evidence(
                     archive,
                     date(2026, 8, 16),

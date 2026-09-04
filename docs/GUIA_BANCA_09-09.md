@@ -16,7 +16,7 @@ evidência não comprova um dado, a entrada permanece pendente.
 2. Selecione a cópia de demonstração da planilha, agosto de 2026 e 2ª quinzena.
 3. Clique em **Validar planilha e período**.
 4. Mostre que existem três entradas possíveis: leitura do WhatsApp Web, última
-   leitura salva e **Importar fotos sem abrir o WhatsApp**.
+   leitura salva e **Importar ZIP do WhatsApp**.
 5. Para uma demonstração previsível, use a última leitura salva ou importe a
    pasta/ZIP de demonstração.
 6. Abra **Analisar fotos com Leitura Visual 2**. As leituras já processadas são reutilizadas.
@@ -28,7 +28,7 @@ evidência não comprova um dado, a entrada permanece pendente.
 ## Plano de recuperação ao vivo
 
 - Se o WhatsApp não carregar o histórico: use a última leitura salva da mesma quinzena.
-- Se não quiser abrir o WhatsApp: importe o ZIP da conversa ou uma pasta de fotos.
+- Se não quiser abrir o WhatsApp: importe o ZIP da conversa exportado com **Incluir mídia**.
 - Se a internet estiver instável: a análise das fotos já copiadas é local.
 - Se o Excel estiver aberto: feche-o e tente importar novamente; o backup fica preservado.
 - Nunca use a planilha oficial durante a apresentação. Use a cópia identificada como teste.
@@ -39,7 +39,7 @@ evidência não comprova um dado, a entrada permanece pendente.
 - 85 entradas sem pendência e 84 encaminhadas para revisão.
 - Entre 68 correspondências seguras com o fechamento manual: tipo 98,5%, obra 94,1%,
   peça 95,6%, seção 93,8%, comprimento 93,9% e volume 89,7%.
-- 79 testes automáticos aprovados.
+- 82 testes automáticos aprovados.
 - Importação testada em cópia: linha inserida com fórmulas e backup em menos de 4 segundos.
 
 Os percentuais medem somente correspondências identificadas com segurança no

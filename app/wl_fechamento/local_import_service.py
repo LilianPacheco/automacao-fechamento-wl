@@ -37,6 +37,12 @@ MESSAGE_PATTERNS = (
         r"(?P<sender>[^:]+):\s*(?P<body>.*)$"
     ),
 )
+US_MESSAGE_PATTERN = re.compile(
+    r"^[\u200e\u200f]*\[(?P<month>\d{1,2})/(?P<day>\d{1,2})/(?P<year>\d{2,4}),\s*"
+    r"(?P<clock>\d{1,2}:\d{2})(?::\d{2})?\s*(?P<ampm>AM|PM)\]\s*"
+    r"(?P<sender>[^:]+):\s*(?P<body>.*)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -58,6 +64,28 @@ def parse_exported_chat(text: str) -> list[ExportedMessage]:
     messages: list[ExportedMessage] = []
     for raw_line in text.splitlines():
         line = raw_line.strip("\ufeff")
+        us_match = US_MESSAGE_PATTERN.match(line)
+        if us_match:
+            year = int(us_match.group("year"))
+            if year < 100:
+                year += 2000
+            try:
+                message_date = date(
+                    year, int(us_match.group("month")), int(us_match.group("day"))
+                ).strftime("%d/%m/%Y")
+                message_time = datetime.strptime(
+                    f"{us_match.group('clock')} {us_match.group('ampm').upper()}",
+                    "%I:%M %p",
+                ).strftime("%H:%M")
+            except ValueError:
+                continue
+            messages.append(ExportedMessage(
+                message_date=message_date,
+                message_time=message_time,
+                sender=us_match.group("sender").strip(),
+                body=us_match.group("body").strip(),
+            ))
+            continue
         match = next((pattern.match(line) for pattern in MESSAGE_PATTERNS if pattern.match(line)), None)
         if match:
             try:
@@ -116,7 +144,7 @@ def import_local_evidence(
 ) -> WhatsAppProbeResult:
     source_path = Path(source).expanduser().resolve()
     if not source_path.exists():
-        raise RuntimeError("A pasta ou o ZIP selecionado não existe.")
+        raise RuntimeError("O ZIP selecionado não existe.")
 
     with tempfile.TemporaryDirectory(prefix="wl_evidencias_") as temporary:
         if source_path.is_file():
@@ -159,15 +187,17 @@ def import_local_evidence(
                 except OSError:
                     continue
             if "imagem ocultada" in text_preview or "image omitted" in text_preview:
+                archive_files = [path for path in scan_root.rglob("*") if path.is_file()]
+                names = ", ".join(path.name for path in archive_files[:5])
                 raise RuntimeError(
-                    "O arquivo foi exportado sem as fotos: ele contém apenas o texto "
-                    "da conversa e marca as mídias como 'imagem ocultada'. Exporte "
-                    "novamente escolhendo 'Incluir mídia' ou selecione uma pasta que "
-                    "contenha as fotos JPG/PNG."
+                    f"O ZIP possui {len(archive_files)} arquivo(s) e 0 fotos"
+                    f" ({names}). Ele foi exportado sem as mídias e marca as imagens "
+                    "como 'imagem ocultada'. Exporte "
+                    "novamente escolhendo 'Incluir mídia'."
                 )
             raise RuntimeError(
-                "Nenhuma foto JPG, PNG ou WEBP foi encontrada. Se a pasta contém um "
-                "ZIP, escolha 'Sim' e selecione o próprio arquivo ZIP."
+                "Nenhuma foto JPG, PNG ou WEBP foi encontrada dentro do ZIP. "
+                "Exporte novamente a conversa escolhendo 'Incluir mídia'."
             )
 
         text_files = sorted(path for path in scan_root.rglob("*.txt") if path.is_file())

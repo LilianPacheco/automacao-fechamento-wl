@@ -7,7 +7,7 @@ quinzena, recuperação da captura correta, leitura visual, revisão por situaç
 consolidação de aprovados, backup e escrita no Excel.
 
 A coleta pelo WhatsApp Web deixou de ser obrigatória. A versão 0.4.0 também
-aceita pasta de fotos e ZIP exportado, preservando os metadados encontrados no
+aceita ZIP exportado com mídia, preservando os metadados encontrados no
 arquivo de conversa e enviando datas não comprovadas para revisão.
 
 ## Evidências
@@ -21,7 +21,7 @@ arquivo de conversa e enviando datas não comprovadas para revisão.
 - Produto e tipo usam as opções oficiais, incluindo todas as faixas de viga.
 - A importação criou backup e escreveu uma linha controlada na linha 245 da cópia,
   preservando as fórmulas das colunas calculadas.
-- A suíte automatizada terminou com 79 testes aprovados.
+- A suíte automatizada terminou com 82 testes aprovados.
 
 ## Limite conhecido
 

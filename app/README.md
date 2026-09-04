@@ -17,7 +17,7 @@ Versão integrada do aplicativo Windows para o fechamento quinzenal.
 - carrega o histórico até encontrar a data inicial da quinzena;
 - informa fotos, PDFs, reações 🆗 e entradas de Estaca que estiverem visíveis.
 - recupera uma leitura completa já salva da quinzena correta, sem misturar períodos;
-- importa um ZIP exportado pelo WhatsApp ou uma pasta de fotos, sem controlar o navegador;
+- importa um ZIP exportado pelo WhatsApp com as mídias, sem controlar o navegador;
 - reaproveita data, horário, remetente e quantidade do arquivo de conversa quando disponíveis;
 - analisa as fotos com a Leitura Visual 2;
 - mantém entradas editadas como pendentes até a confirmação explícita;
@@ -41,8 +41,8 @@ diretório `Profile 2` do Chrome. O aplicativo não abre novas abas; se o WhatsA
 não estiver aberto, ele apenas apresentará um aviso.
 
 O WhatsApp Web é opcional. Depois de validar a planilha e o período, use
-`Importar fotos sem abrir o WhatsApp` para escolher um ZIP exportado pelo celular
-ou uma pasta contendo apenas as evidências da quinzena. Fotos sem data
+`Importar ZIP do WhatsApp` para escolher um ZIP exportado pelo celular com a opção
+`Incluir mídia`. Fotos sem data
 comprovável entram na revisão com a data pendente; o aplicativo não inventa a data.
 
 ## Executar no ambiente de desenvolvimento
