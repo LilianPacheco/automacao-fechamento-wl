@@ -14,10 +14,16 @@ from PIL import Image, ImageDraw
 from wl_fechamento.config import load_configuration, save_configuration
 from wl_fechamento.label_parser import parse_label_text
 from wl_fechamento.ocr_service import _orange_label_crop, score_ocr_text
-from wl_fechamento.chrome_bridge import BRIDGE_PORT, ChromeBridge, load_saved_whatsapp_session
+from wl_fechamento.chrome_bridge import (
+    BRIDGE_PORT,
+    ChromeBridge,
+    load_resume_attachment_positions,
+    load_saved_whatsapp_session,
+)
 from wl_fechamento.models import AppConfiguration, PeriodSelection
 from wl_fechamento.stake_parser import parse_stake_text
 from wl_fechamento.whatsapp_service import (
+    GROUP_NAME,
     WhatsAppProbeResult,
     _parse_probe_output,
     merge_period_results,
@@ -401,6 +407,46 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class WhatsAppProbeTests(unittest.TestCase):
+    def test_resume_positions_reuse_only_real_whatsapp_captures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for folder_name, group_name in (
+                ("whatsapp", GROUP_NAME),
+                ("local", "Pasta ou ZIP local"),
+            ):
+                directory = root / folder_name
+                directory.mkdir()
+                message_id = f"album-{folder_name}-3"
+                (directory / "sessao_whatsapp.json").write_text(json.dumps({
+                    "connected": True,
+                    "group_found": True,
+                    "group_name": group_name,
+                    "start_date": "16/08/2026",
+                    "evidences": [{
+                        "message_id": message_id,
+                        "message_date": "20/08/2026",
+                        "image_count": 3,
+                    }],
+                }), encoding="utf-8")
+                (directory / f"{message_id}_hash_foto_2.jpg").write_bytes(b"image")
+
+            positions = load_resume_attachment_positions(
+                date(2026, 8, 16), date(2026, 8, 31), root
+            )
+
+            self.assertEqual(positions, {"album-whatsapp-3": [1]})
+
+    def test_bridge_exposes_resume_queue_to_extension(self) -> None:
+        bridge = ChromeBridge(
+            date(2026, 8, 16),
+            date(2026, 8, 31),
+            resume_attachment_positions={"album-1": [0, 2]},
+        )
+        self.assertEqual(
+            bridge.config["resume_attachment_positions"],
+            {"album-1": [0, 2]},
+        )
+
     def test_saved_session_is_recovered_from_local_images(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -438,6 +484,7 @@ class WhatsAppProbeTests(unittest.TestCase):
                 "message_date": "17/07/2026",
                 "message_time": "16:35",
                 "sender": "Wilian",
+                "message_text": "Quantidade 4",
                 "image_count": 0,
                 "pdf_names": ["Carga 115.pdf"],
                 "stake_text": "",
@@ -451,6 +498,7 @@ class WhatsAppProbeTests(unittest.TestCase):
         })
         self.assertEqual(len(result.evidences), 1)
         self.assertEqual(result.evidences[0].pdf_names, ["Carga 115.pdf"])
+        self.assertEqual(result.evidences[0].message_text, "Quantidade 4")
         self.assertEqual(result.evidences[0].kind_label, "1 PDF")
         self.assertTrue(result.evidences[0].has_ok)
         self.assertEqual(result.incomplete_albums[0].expected, 10)

@@ -14,6 +14,7 @@ let wlRunningSession = "";
 let wlAttachmentErrors = [];
 let wlNavigationStage = "não iniciado";
 let wlNavigationDateReached = false;
+let wlCapturedPositions = new Map();
 
 function wlSleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -647,6 +648,7 @@ function wlCollectInventoryFromRows(panel, config, knownIds, dateState = null) {
       message_date: currentDate,
       message_time: messageTime,
       sender,
+      message_text: wlMessageCaptionText(element, text),
       image_count: imageCount,
       image_sources: imageSources,
       media_elements: mediaButtons,
@@ -728,6 +730,7 @@ function wlCollectInventory(panel, config, options = {}) {
       message_date: messageDate,
       message_time: messageTime,
       sender,
+      message_text: wlMessageCaptionText(bubble, text),
       image_count: imageCount,
       image_sources: imageSources,
       media_elements: mediaButtons,
@@ -879,6 +882,16 @@ async function wlUploadAttachment(config, item, source, sourceIndex) {
   if (secondAttempt?.ok) return true;
   if (secondAttempt?.error) wlAttachmentErrors.push(secondAttempt.error);
   return false;
+}
+
+function wlCapturedPositionSet(config, messageId) {
+  if (!wlCapturedPositions.has(messageId)) {
+    const resumed = config.resume_attachment_positions?.[messageId] || [];
+    wlCapturedPositions.set(messageId, new Set(
+      resumed.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 0)
+    ));
+  }
+  return wlCapturedPositions.get(messageId);
 }
 
 function wlLargestLoadedImage(root) {
@@ -1057,12 +1070,14 @@ async function wlCloseMessageSearch() {
 }
 
 async function wlCaptureAlbumAttachments(item, config, uploadedSources, panel) {
+  const capturedPositions = wlCapturedPositionSet(config, item.message_id);
+  const savedCount = () => Math.min(item.image_count, capturedPositions.size);
   await wlCloseMessageSearch();
-  if (!(await wlCloseExistingViewer())) return 0;
+  if (!(await wlCloseExistingViewer())) return savedCount();
   const opener = (item.media_elements || []).find((element) => {
     return element?.isConnected;
   });
-  if (!opener) return 0;
+  if (!opener) return savedCount();
   opener.scrollIntoView({ block: "center", inline: "nearest" });
   await wlSleep(350);
   const visibleOpener = (item.media_elements || []).find((element) => {
@@ -1071,7 +1086,7 @@ async function wlCaptureAlbumAttachments(item, config, uploadedSources, panel) {
       rectangle.bottom > 0 && rectangle.top < window.innerHeight &&
       rectangle.right > 0 && rectangle.left < window.innerWidth;
   });
-  if (!visibleOpener) return 0;
+  if (!visibleOpener) return savedCount();
   const opened = await wlRequestTrustedClick(visibleOpener);
   if (!opened) visibleOpener.click();
 
@@ -1087,13 +1102,12 @@ async function wlCaptureAlbumAttachments(item, config, uploadedSources, panel) {
       if (!viewer) await wlSleep(100);
     }
   }
-  if (!viewer) return 0;
+  if (!viewer) return savedCount();
 
   // Album previews may open on the fourth (or another) thumbnail. Always
   // rewind to the first photo before counting/copying the sequence.
   viewer = await wlRewindViewer(viewer, panel, item.image_count);
 
-  let captured = 0;
   let previousSource = "";
   let prefetched = null;
   for (let position = 0; position < item.image_count; position += 1) {
@@ -1103,7 +1117,7 @@ async function wlCaptureAlbumAttachments(item, config, uploadedSources, panel) {
     viewer = loaded.root || wlMediaViewerRoot(panel) || viewer;
     previousSource = loaded.source;
     wlNavigationStage = `galeria: preparando foto ${position + 1} de ${item.image_count}`;
-    if (!uploadedSources.has(loaded.source)) {
+    if (!capturedPositions.has(position) && !uploadedSources.has(loaded.source)) {
       uploadedSources.add(loaded.source);
       try {
         wlNavigationStage = `galeria: enviando foto ${position + 1} de ${item.image_count}`;
@@ -1112,7 +1126,7 @@ async function wlCaptureAlbumAttachments(item, config, uploadedSources, panel) {
           18000,
           `A foto ${position + 1} excedeu o tempo individual.`
         );
-        if (uploaded) captured += 1;
+        if (uploaded) capturedPositions.add(position);
         else uploadedSources.delete(loaded.source);
       } catch (error) {
         wlAttachmentErrors.push(String(error?.message || error));
@@ -1125,6 +1139,7 @@ async function wlCaptureAlbumAttachments(item, config, uploadedSources, panel) {
     if (!prefetched) break;
   }
 
+  const captured = Math.min(item.image_count, capturedPositions.size);
   wlNavigationStage = `galeria encerrada: ${captured} de ${item.image_count}`;
 
   const closeButton = wlViewerButton(viewer, ["fechar", "close"]);
@@ -1155,7 +1170,7 @@ async function wlUploadInventoryAttachments(items, config, uploadedSources) {
       // já salvas, para recuperar fotos que falharam na primeira passagem.
       for (let retry = 0; retry < 2 && captured < item.image_count; retry += 1) {
         await wlSleep(500);
-        captured += await wlCaptureAlbumAttachments(
+        captured = await wlCaptureAlbumAttachments(
           item, config, uploadedSources, panel
         );
       }
@@ -1163,6 +1178,8 @@ async function wlUploadInventoryAttachments(items, config, uploadedSources) {
       if (captured > 0) continue;
     }
     for (const [sourceIndex, source] of (item.image_sources || []).entries()) {
+      const capturedPositions = wlCapturedPositionSet(config, item.message_id);
+      if (capturedPositions.has(sourceIndex)) continue;
       if (uploadedSources.has(source)) continue;
       uploadedSources.add(source);
       pending.push({ item, source, sourceIndex });
@@ -1178,10 +1195,13 @@ async function wlUploadInventoryAttachments(items, config, uploadedSources) {
           config, current.item, current.source, current.sourceIndex
         );
         if (!uploaded) uploadedSources.delete(current.source);
-        else directCounts.set(
-          current.item.message_id,
-          (directCounts.get(current.item.message_id) || 0) + 1
-        );
+        else {
+          wlCapturedPositionSet(config, current.item.message_id).add(current.sourceIndex);
+          directCounts.set(
+            current.item.message_id,
+            wlCapturedPositionSet(config, current.item.message_id).size
+          );
+        }
       } catch (error) {
         wlAttachmentErrors.push(String(error?.message || error));
         uploadedSources.delete(current.source);
@@ -1194,7 +1214,10 @@ async function wlUploadInventoryAttachments(items, config, uploadedSources) {
   );
   await Promise.all(workers);
   for (const item of items) {
-    const direct = directCounts.get(item.message_id) || 0;
+    const direct = Math.max(
+      directCounts.get(item.message_id) || 0,
+      wlCapturedPositionSet(config, item.message_id).size
+    );
     if (direct) {
       item.album_captured_count = Math.max(
         Number(item.album_captured_count || 0), direct
@@ -2047,6 +2070,8 @@ async function wlCheckForSession() {
     if (!config) return;
     if (!config.session_id || config.session_id === wlRunningSession) return;
     wlRunningSession = config.session_id;
+    wlCapturedPositions = new Map();
+    wlAttachmentErrors = [];
     wlPost({
       session_id: config.session_id,
       token: config.token,

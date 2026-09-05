@@ -8,7 +8,7 @@ import secrets
 import subprocess
 import threading
 import uuid
-from datetime import date
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,7 @@ class ChromeBridge:
         target_test_date: date | None = None,
         target_album_size: int | None = None,
         target_album_message_id: str | None = None,
+        resume_attachment_positions: dict[str, list[int]] | None = None,
     ) -> None:
         self.session_id = uuid.uuid4().hex
         self.token = secrets.token_urlsafe(24)
@@ -46,6 +47,7 @@ class ChromeBridge:
             "group_name": GROUP_NAME,
             "start_label": start_date.strftime("%d/%m/%Y"),
             "end_label": end_date.strftime("%d/%m/%Y"),
+            "resume_attachment_positions": resume_attachment_positions or {},
         }
         try:
             manifest = json.loads(
@@ -317,12 +319,70 @@ def merge_saved_whatsapp_sessions(
                 payload = json.loads(snapshot.read_text(encoding="utf-8"))
                 if str(payload.get("start_date") or "") != start_label:
                     continue
+                if str(payload.get("group_name") or "") != GROUP_NAME:
+                    continue
                 supplemental.append(load_saved_whatsapp_session(snapshot.parent))
             except (OSError, json.JSONDecodeError, RuntimeError):
                 continue
     return merge_period_results(
         current, supplemental, start_date, end_date
     )
+
+
+def load_resume_attachment_positions(
+    start_date: date,
+    end_date: date,
+    captures_root: Path | None = None,
+) -> dict[str, list[int]]:
+    """Return image positions already saved for this exact fortnight.
+
+    WhatsApp albums are numbered as ``foto_1``, ``foto_2`` and so on.  Sending
+    these zero-based positions back to the extension lets a later attempt walk
+    through the gallery without uploading the same files again.
+    """
+    root = captures_root or configuration_directory() / "Capturas"
+    if not root.exists():
+        return {}
+    start_label = start_date.strftime("%d/%m/%Y")
+    positions: dict[str, set[int]] = {}
+    snapshots = sorted(
+        root.glob("*/sessao_whatsapp.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for snapshot in snapshots:
+        try:
+            payload = json.loads(snapshot.read_text(encoding="utf-8"))
+            if str(payload.get("start_date") or "") != start_label:
+                continue
+            if str(payload.get("group_name") or "") != GROUP_NAME:
+                continue
+            result = load_saved_whatsapp_session(snapshot.parent)
+        except (OSError, json.JSONDecodeError, RuntimeError):
+            continue
+        evidence_dates = {
+            evidence.message_id: evidence.message_date for evidence in result.evidences
+        }
+        for attachment in result.captured_attachments:
+            message_date = evidence_dates.get(attachment.message_id, "")
+            try:
+                parsed_date = datetime.strptime(message_date, "%d/%m/%Y").date()
+            except ValueError:
+                continue
+            if not start_date <= parsed_date <= end_date:
+                continue
+            match = re.search(r"foto_(\d+)", attachment.filename, re.IGNORECASE)
+            if not match:
+                match = re.search(r"foto_(\d+)", Path(attachment.path).name, re.IGNORECASE)
+            if not match:
+                continue
+            positions.setdefault(attachment.message_id, set()).add(
+                max(0, int(match.group(1)) - 1)
+            )
+    return {
+        message_id: sorted(saved_positions)
+        for message_id, saved_positions in positions.items()
+    }
 
 
 def load_latest_complete_whatsapp_session(
@@ -391,13 +451,18 @@ def chrome_is_running() -> bool:
 def probe_whatsapp_chrome(
     start_date: date,
     end_date: date,
-    timeout_seconds: int = 960,
+    timeout_seconds: int = 2760,
 ) -> WhatsAppProbeResult:
     if not CHROME_EXECUTABLE.exists():
         raise RuntimeError("O Google Chrome não foi localizado.")
     if not (EXTENSION_DIRECTORY / "manifest.json").exists():
         raise RuntimeError("A extensão local do Fechamento WL não foi localizada.")
-    bridge = ChromeBridge(start_date, end_date)
+    resume_positions = load_resume_attachment_positions(start_date, end_date)
+    bridge = ChromeBridge(
+        start_date,
+        end_date,
+        resume_attachment_positions=resume_positions,
+    )
     bridge.start()
     try:
         current = bridge.wait_for_result(timeout_seconds)

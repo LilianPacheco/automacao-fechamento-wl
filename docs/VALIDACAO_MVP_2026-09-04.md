@@ -16,12 +16,14 @@ arquivo de conversa e enviando datas não comprovadas para revisão.
   169 fotos únicas e nenhum álbum incompleto.
 - A recuperação aceita dia sem movimento no início do período e não mistura
   registros de outra quinzena.
+- A captura pelo WhatsApp preserva a legenda e retoma álbuns incompletos pelas
+  posições ainda não salvas, sem misturar importações locais com a fila do grupo.
 - A revisão mantém uma entrada pendente após a edição de qualquer campo; somente
   uma alteração explícita da situação permite aprovar.
 - Produto e tipo usam as opções oficiais, incluindo todas as faixas de viga.
 - A importação criou backup e escreveu uma linha controlada na linha 245 da cópia,
   preservando as fórmulas das colunas calculadas.
-- A suíte automatizada terminou com 82 testes aprovados.
+- A suíte automatizada terminou com 84 testes aprovados.
 
 ## Limite conhecido
 

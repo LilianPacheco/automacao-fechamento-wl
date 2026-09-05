@@ -41,7 +41,7 @@ class ReviewHtmlBehaviorTests(unittest.TestCase):
             manifest["content_scripts"][0]["js"],
             ["quantity.js", "content_v185.js"],
         )
-        self.assertEqual(manifest["version"], "1.8.25")
+        self.assertEqual(manifest["version"], "1.8.26")
 
     def test_reader_opens_current_whatsapp_search_variants(self) -> None:
         reader = (
@@ -65,6 +65,9 @@ class ReviewHtmlBehaviorTests(unittest.TestCase):
         self.assertIn("function wlRequestTrustedPoint", reader)
         self.assertIn("function wlRewindViewer", reader)
         self.assertIn("const directCounts = new Map()", reader)
+        self.assertIn("function wlCapturedPositionSet", reader)
+        self.assertIn("resume_attachment_positions", reader)
+        self.assertIn("message_text: wlMessageCaptionText", reader)
 
     def test_reader_reacquires_calendar_after_changing_month(self) -> None:
         reader = (

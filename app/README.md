@@ -17,6 +17,8 @@ Versão integrada do aplicativo Windows para o fechamento quinzenal.
 - carrega o histórico até encontrar a data inicial da quinzena;
 - informa fotos, PDFs, reações 🆗 e entradas de Estaca que estiverem visíveis.
 - recupera uma leitura completa já salva da quinzena correta, sem misturar períodos;
+- preserva data, remetente e legenda antes da captura das imagens;
+- mantém uma fila de posições já capturadas e, em nova tentativa, busca somente as fotos faltantes;
 - importa um ZIP exportado pelo WhatsApp com as mídias ou uma pasta normal de fotos, sem controlar o navegador;
 - reaproveita data, horário, remetente e quantidade do arquivo de conversa quando disponíveis;
 - analisa as fotos com a Leitura Visual 2;

@@ -28,6 +28,7 @@ class WhatsAppEvidence:
     message_date: str
     message_time: str = ""
     sender: str = ""
+    message_text: str = ""
     image_count: int = 0
     pdf_names: list[str] = field(default_factory=list)
     stake_text: str = ""
@@ -69,6 +70,7 @@ class WhatsAppEvidence:
             message_date=str(data.get("message_date", "")),
             message_time=str(data.get("message_time", "")),
             sender=str(data.get("sender", "")),
+            message_text=str(data.get("message_text", "")),
             image_count=max(0, int(data.get("image_count", 0))),
             pdf_names=[str(item) for item in data.get("pdf_names", [])],
             stake_text=str(data.get("stake_text", "")),
@@ -276,12 +278,14 @@ def merge_period_results(
             current = evidence_by_id.get(evidence.message_id)
             current_richness = (
                 current.image_count + len(current.pdf_names) +
-                bool(current.stake_text) + bool(current.quantity_hint)
+                bool(current.stake_text) + bool(current.quantity_hint) +
+                bool(current.message_text)
                 if current else -1
             )
             candidate_richness = (
                 evidence.image_count + len(evidence.pdf_names) +
-                bool(evidence.stake_text) + bool(evidence.quantity_hint)
+                bool(evidence.stake_text) + bool(evidence.quantity_hint) +
+                bool(evidence.message_text)
             )
             if current is None or candidate_richness > current_richness:
                 evidence_by_id[evidence.message_id] = evidence

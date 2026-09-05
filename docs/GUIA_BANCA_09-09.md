@@ -39,7 +39,7 @@ evidência não comprova um dado, a entrada permanece pendente.
 - 85 entradas sem pendência e 84 encaminhadas para revisão.
 - Entre 68 correspondências seguras com o fechamento manual: tipo 98,5%, obra 94,1%,
   peça 95,6%, seção 93,8%, comprimento 93,9% e volume 89,7%.
-- 82 testes automáticos aprovados.
+- 84 testes automáticos aprovados.
 - Importação testada em cópia: linha inserida com fórmulas e backup em menos de 4 segundos.
 
 Os percentuais medem somente correspondências identificadas com segurança no

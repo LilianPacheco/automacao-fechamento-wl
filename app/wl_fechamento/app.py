@@ -46,7 +46,7 @@ COLORS = {
 class FechamentoApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Automação do Fechamento WL — Leitura Visual 2 — v0.4.2")
+        self.title("Automação do Fechamento WL — Captura retomável — v0.5.0")
         self.geometry("1040x610+35+25")
         self.minsize(900, 550)
         self.configure(bg=COLORS["background"])
@@ -570,7 +570,14 @@ class FechamentoApp(tk.Tk):
             "Nenhuma mensagem e nenhum dado da planilha foram alterados.",
         ]
         self._set_details(details)
-        self.next_button.configure(state="normal", text="Atualizar leitura das evidências")
+        self.next_button.configure(
+            state="normal",
+            text=(
+                "Continuar captura somente das fotos faltantes"
+                if result.incomplete_albums
+                else "Atualizar leitura das evidências"
+            ),
+        )
         self.local_import_button.configure(state="normal")
         if (
             result.period_scan_complete
@@ -589,6 +596,12 @@ class FechamentoApp(tk.Tk):
                 text="Concluir leitura de toda a quinzena antes da revisão",
             )
         elif result.incomplete_albums:
+            details.extend([
+                "",
+                "As fotos já salvas serão reaproveitadas. A próxima tentativa "
+                "percorrerá os álbuns somente para recuperar as posições faltantes.",
+            ])
+            self._set_details(details)
             self.review_button.configure(
                 state="disabled",
                 text="Concluir captura dos álbuns antes da revisão",
