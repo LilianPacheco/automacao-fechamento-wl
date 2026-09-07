@@ -1,8 +1,9 @@
 "use strict";
 
 (function wlFechamentoReaderScope() {
-if (globalThis.__WL_FECHAMENTO_READER_ACTIVE__) return;
-globalThis.__WL_FECHAMENTO_READER_ACTIVE__ = true;
+const WL_READER_VERSION = "1.9.1";
+if (globalThis.__WL_FECHAMENTO_READER_ACTIVE__ === WL_READER_VERSION) return;
+globalThis.__WL_FECHAMENTO_READER_ACTIVE__ = WL_READER_VERSION;
 
 const WL_LOAD_OLDER =
   "Clique neste aviso para carregar mensagens mais antigas do seu celular.";

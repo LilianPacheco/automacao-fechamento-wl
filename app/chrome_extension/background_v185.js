@@ -11,11 +11,15 @@ function wlWakeWhatsAppTabs() {
       if (!Number.isInteger(tab.id)) continue;
       chrome.tabs.sendMessage(tab.id, { type: "WL_WAKE" }, (response) => {
         const missingReceiver = chrome.runtime.lastError;
-        // O content script já é carregado pelo manifest. Reinseri-lo aqui
-        // criava duas cópias na mesma aba e interrompia a leitura. Se a aba
-        // ainda estiver carregando, o próximo alarme tentará acordá-la.
-        void missingReceiver;
-        void response;
+        if (!missingReceiver || response?.ok) return;
+        // Chrome can restore an already-open WhatsApp tab after an unpacked
+        // extension update without attaching the new content script. Inject
+        // only when there is demonstrably no receiver; the version guard in
+        // content_v185.js prevents duplicate readers.
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ["quantity.js", "content_v185.js"],
+        }).catch(() => {});
       });
     }
   });

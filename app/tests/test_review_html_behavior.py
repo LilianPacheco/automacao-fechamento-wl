@@ -41,7 +41,7 @@ class ReviewHtmlBehaviorTests(unittest.TestCase):
             manifest["content_scripts"][0]["js"],
             ["quantity.js", "content_v185.js"],
         )
-        self.assertEqual(manifest["version"], "1.9.0")
+        self.assertEqual(manifest["version"], "1.9.1")
 
     def test_reader_opens_current_whatsapp_search_variants(self) -> None:
         reader = (
