@@ -18,14 +18,19 @@ Versão integrada do aplicativo Windows para o fechamento quinzenal.
 - informa fotos, PDFs, reações 🆗 e entradas de Estaca que estiverem visíveis.
 - recupera uma leitura completa já salva da quinzena correta, sem misturar períodos;
 - preserva data, remetente e legenda antes da captura das imagens;
+- registra o inventário em uma fila local antes de abrir cada galeria;
+- mantém identidade própria para cada linha extraída, inclusive várias linhas da mesma foto;
 - mantém uma fila de posições já capturadas e, em nova tentativa, busca somente as fotos faltantes;
 - importa um ZIP exportado pelo WhatsApp com as mídias ou uma pasta normal de fotos, sem controlar o navegador;
 - reaproveita data, horário, remetente e quantidade do arquivo de conversa quando disponíveis;
 - analisa as fotos com a Leitura Visual 2;
+- preserva a posição dos textos lidos para não trocar comprimento e volume;
+- inclui mensagens textuais de Estaca e todas as páginas de PDFs copiados;
 - mantém entradas editadas como pendentes até a confirmação explícita;
 - permite filtrar pendentes, confirmados, aprovados e rejeitados;
 - consolida somente os aprovados;
 - grava na aba da quinzena selecionada após criar backup automático.
+- recalcula a cópia no Excel e bloqueia importações repetidas da mesma evidência.
 
 ## Limite atual do piloto
 

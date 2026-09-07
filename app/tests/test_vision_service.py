@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from wl_fechamento.review_service import (
+    _stake_delivery_layout_drafts,
     _vision_analysis_to_draft,
     build_advanced_review_drafts,
 )
@@ -16,7 +17,9 @@ from wl_fechamento.vision_service import (
     apply_group_context,
     decide_fields,
     evaluate_against_reference,
+    _layout_field_readings,
 )
+from wl_fechamento.paddle_ocr_service import LayoutLine
 from wl_fechamento.whatsapp_service import (
     WhatsAppAttachment,
     WhatsAppEvidence,
@@ -33,6 +36,61 @@ Vol: 3,125"""
 
 
 class VisionDecisionTests(unittest.TestCase):
+    def test_stake_delivery_uses_meters_column_and_groups_dimension(self) -> None:
+        def line(text, left, top, right):
+            return LayoutLine(text, 0.99, left, top, right, top + 20)
+
+        lines = [
+            line("OBRA: MAP", 250, 70, 390),
+            line("BIGUAÇU", 250, 95, 390),
+            line("Peça", 10, 200, 90),
+            line("Dimensão", 120, 200, 230),
+            line("Quantidade", 280, 200, 400),
+            line("Comprimento", 450, 200, 580),
+            line("Metros", 650, 200, 730),
+            line("Peso", 810, 200, 870),
+            line("ESTACA", 10, 240, 90), line("20x20", 140, 240, 210),
+            line("4", 330, 240, 345), line("8,00", 490, 240, 540),
+            line("32", 675, 240, 705), line("0,80", 820, 240, 860),
+            line("ESTACA", 10, 280, 90), line("20x20", 140, 280, 210),
+            line("4", 330, 280, 345), line("10,00", 490, 280, 550),
+            line("40", 675, 280, 705), line("1,00", 820, 280, 860),
+            line("ESTACA", 10, 320, 90), line("23x23", 140, 320, 210),
+            line("20", 325, 320, 350), line("8,00", 490, 320, 540),
+            line("160", 670, 320, 710), line("1,05", 820, 320, 860),
+        ]
+        result = WhatsAppProbeResult(
+            connected=True, group_found=True, start_date_found=True,
+            start_date="17/08/2026",
+            evidences=[WhatsAppEvidence("msg-1", "17/08/2026")],
+        )
+
+        drafts = _stake_delivery_layout_drafts(lines, result, "msg-1", "foto.jpg")
+
+        self.assertEqual([(item.section, item.quantity) for item in drafts], [
+            ("20X20", 72), ("23X23", 160),
+        ])
+        self.assertTrue(all(item.product == "ESTACA" for item in drafts))
+        self.assertTrue(all(item.unit_volume is None for item in drafts))
+        self.assertTrue(all(item.work == "MAP BIGUAÇU" for item in drafts))
+        self.assertTrue(all(item.status == "PRONTO PARA REVISÃO" for item in drafts))
+
+    def test_layout_keeps_length_and_volume_in_their_own_rows(self) -> None:
+        lines = [
+            LayoutLine("Comprimento", 0.98, 10, 100, 130, 125),
+            LayoutLine("11,291", 0.97, 160, 100, 230, 125),
+            LayoutLine("Vol. (m3)", 0.96, 310, 160, 390, 185),
+            LayoutLine("1,340", 0.95, 420, 160, 475, 185),
+        ]
+
+        readings = _layout_field_readings(lines)
+        values = {
+            reading.field_hint: reading.text for reading in readings
+        }
+
+        self.assertIn("11,291", values["length"])
+        self.assertIn("1,340", values["unit_volume"])
+
     def test_two_independent_readings_confirm_each_explicit_field(self) -> None:
         decisions = decide_fields([
             VisionReading("motor_a", COMPLETE_LABEL, 0.91),
@@ -264,6 +322,74 @@ class VisionDecisionTests(unittest.TestCase):
             self.assertTrue(
                 (Path(temporary) / "analise_visual_v2" / "abc123.json").exists()
             )
+
+    def test_advanced_flow_includes_textual_stake_entry(self) -> None:
+        readings = [VisionReading("motor_a", COMPLETE_LABEL, 0.95)]
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "foto.jpg"
+            image_path.write_bytes(b"test-image")
+            analysis = VisionAnalysis(
+                source_path=str(image_path), label_crop_path="etiqueta.png",
+                fields=decide_fields(readings), readings=readings,
+                product_type="PILAR",
+            )
+            result = WhatsAppProbeResult(
+                connected=True, group_found=True, start_date_found=True,
+                start_date="20/08/2026",
+                evidences=[
+                    WhatsAppEvidence("msg-foto", "20/08/2026"),
+                    WhatsAppEvidence(
+                        "msg-estaca", "20/08/2026",
+                        message_text="16x16x8+100", stake_text="16x16x8+100",
+                    ),
+                ],
+                captured_attachments=[WhatsAppAttachment(
+                    "msg-foto", image_path.name, "image/jpeg", str(image_path),
+                    10, "abc123",
+                )],
+            )
+            with patch("wl_fechamento.review_service.analyze_image", return_value=analysis):
+                drafts = build_advanced_review_drafts(result)
+
+            stake = next(item for item in drafts if item.message_id == "msg-estaca")
+            self.assertEqual(stake.piece, "16")
+            self.assertEqual(stake.quantity, 800)
+            self.assertIn("Confirmar obra", stake.warnings)
+            self.assertTrue(stake.record_id.startswith("wl-"))
+
+    def test_reprocessing_preserves_pending_manual_review(self) -> None:
+        readings = [VisionReading("motor_a", COMPLETE_LABEL, 0.95)]
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "foto.jpg"
+            image_path.write_bytes(b"test-image")
+            analysis = VisionAnalysis(
+                source_path=str(image_path), label_crop_path="etiqueta.png",
+                fields=decide_fields(readings), readings=readings,
+                product_type="PILAR",
+            )
+            result = WhatsAppProbeResult(
+                connected=True, group_found=True, start_date_found=True,
+                start_date="20/08/2026",
+                evidences=[WhatsAppEvidence("msg-1", "20/08/2026")],
+                captured_attachments=[WhatsAppAttachment(
+                    "msg-1", image_path.name, "image/jpeg", str(image_path),
+                    10, "abc123",
+                )],
+            )
+            with patch("wl_fechamento.review_service.analyze_image", return_value=analysis):
+                build_advanced_review_drafts(result)
+            cache_path = Path(temporary) / "revisao_temporaria.json"
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            row = next(iter(payload.values()))[0]
+            row["work"] = "OBRA CORRIGIDA"
+            row["status"] = "PENDENTE"
+            row["manual_fields"] = ["work"]
+            cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            second = build_advanced_review_drafts(result)
+
+            self.assertEqual(second[0].work, "OBRA CORRIGIDA")
+            self.assertEqual(second[0].status, "PENDENTE")
 
 
 if __name__ == "__main__":

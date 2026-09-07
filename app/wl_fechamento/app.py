@@ -46,7 +46,7 @@ COLORS = {
 class FechamentoApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Automação do Fechamento WL — Captura retomável — v0.5.0")
+        self.title("Automação do Fechamento WL — Fluxo seguro — v0.6.1")
         self.geometry("1040x610+35+25")
         self.minsize(900, 550)
         self.configure(bg=COLORS["background"])
@@ -626,10 +626,14 @@ class FechamentoApp(tk.Tk):
                 "Clique em 'Ler evidências da quinzena' antes de abrir a revisão.",
             )
             return
-        if result is None or not result.captured_attachments:
+        has_text_or_pdf = bool(result and any(
+            evidence.stake_text or evidence.pdf_names
+            for evidence in result.evidences
+        ))
+        if result is None or (not result.captured_attachments and not has_text_or_pdf):
             messagebox.showwarning(
-                "Fotos necessárias",
-                "A leitura desta quinzena ainda não copiou fotos para analisar.",
+                "Evidências necessárias",
+                "A leitura desta quinzena ainda não copiou fotos, PDFs ou textos para analisar.",
             )
             return
         if result.incomplete_albums:
@@ -850,6 +854,10 @@ class ReviewWindow(tk.Toplevel):
         if not self.filtered:
             return True
         draft = self.drafts[self.filtered[self.position]]
+        before = {
+            attribute: getattr(draft, attribute)
+            for _, attribute in self.FIELDS
+        }
         try:
             volume_text = self.variables["unit_volume"].get().strip()
             quantity_text = self.variables["quantity"].get().strip()
@@ -863,6 +871,11 @@ class ReviewWindow(tk.Toplevel):
         for _, attribute in self.FIELDS:
             if attribute not in {"unit_volume", "quantity"}:
                 setattr(draft, attribute, self.variables[attribute].get().strip())
+        changed = {
+            attribute for _, attribute in self.FIELDS
+            if getattr(draft, attribute) != before[attribute]
+        }
+        draft.manual_fields = sorted(set(draft.manual_fields) | changed)
         selected = self.status_choice.get() or self._display_status(draft)
         draft.status = selected
         if selected in {"CONFIRMADO", "APROVADO"}:
@@ -878,14 +891,24 @@ class ReviewWindow(tk.Toplevel):
             return
         try:
             loaded = json.loads(cache_path.read_text(encoding="utf-8"))
-            replacements = {(item.message_id, item.source_path): asdict(item) for item in self.drafts}
+            replacements = {
+                item.record_id: asdict(item)
+                for item in self.drafts if item.record_id
+            }
+            legacy_replacements = {
+                (item.message_id, item.source_path): asdict(item)
+                for item in self.drafts if not item.record_id
+            }
             for group in loaded.values():
                 if not isinstance(group, list):
                     continue
                 for index, row in enumerate(group):
+                    record_id = str(row.get("record_id") or "")
                     key = (str(row.get("message_id") or ""), str(row.get("source_path") or ""))
-                    if key in replacements:
-                        group[index] = replacements[key]
+                    if record_id and record_id in replacements:
+                        group[index] = replacements[record_id]
+                    elif key in legacy_replacements:
+                        group[index] = legacy_replacements[key]
             temporary = cache_path.with_suffix(".tmp")
             temporary.write_text(json.dumps(loaded, ensure_ascii=False, indent=2), encoding="utf-8")
             temporary.replace(cache_path)
@@ -1002,7 +1025,10 @@ class ConsolidatedWindow(tk.Toplevel):
 
     def _run_import(self) -> None:
         try:
-            result = write_approved_rows(self.workbook_path, self.period, self.rows)
+            result = write_approved_rows(
+                self.workbook_path, self.period, self.rows,
+                recalculate_with_excel=True,
+            )
         except Exception as exc:
             message = str(exc)
             self.after(0, lambda: self._import_error(message))
@@ -1015,6 +1041,13 @@ class ConsolidatedWindow(tk.Toplevel):
 
     def _import_success(self, result) -> None:
         self.import_button.configure(state="disabled", text="Importação concluída")
+        if not result.imported_rows and result.skipped_source_ids:
+            messagebox.showinfo(
+                "Nada duplicado",
+                "Estas evidências já haviam sido importadas. Nenhuma linha nova foi criada.",
+                parent=self,
+            )
+            return
         messagebox.showinfo(
             "Importação concluída",
             "As linhas aprovadas foram incluídas.\n\n"

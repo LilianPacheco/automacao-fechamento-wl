@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Fechamento WL — Leitor do WhatsApp",
-  "version": "1.8.26",
+  "version": "1.9.0",
   "description": "Leitura local e somente leitura do grupo de fechamento WL.",
   "permissions": ["debugger", "storage", "alarms"],
   "host_permissions": [
     "https://web.whatsapp.com/*",
+    "https://*.whatsapp.net/*",
     "http://127.0.0.1:8765/*"
   ],
   "background": {

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
+import unicodedata
 from dataclasses import asdict
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Callable
 
 from .label_parser import LabelDraft, normalize_type, parse_document_text
+from .config import configuration_directory
 from .ocr_service import read_image_texts
 from .paddle_ocr_service import is_available as paddle_available
+from .paddle_ocr_service import LayoutLine
+from .pdf_evidence_service import render_pdf_pages
+from .stake_parser import parse_stake_text
 from .vision_service import (
     VISION_PIPELINE_VERSION,
     VisionAnalysis,
@@ -19,6 +25,7 @@ from .vision_service import (
     enrich_isolated_fields_batch,
 )
 from .whatsapp_service import WhatsAppProbeResult
+from .whatsapp_service import WhatsAppAttachment
 
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -341,9 +348,9 @@ def _apply_message_consensus(drafts: list[LabelDraft]) -> None:
 
 def _message_date(result: WhatsAppProbeResult, message_id: str) -> str:
     for evidence in result.evidences:
-        if message_id == evidence.message_id or message_id.startswith(evidence.message_id):
+        if message_id == evidence.message_id or message_id.startswith(f"{evidence.message_id}:"):
             return evidence.message_date
-        if evidence.message_id.startswith(message_id):
+        if evidence.message_id.startswith(f"{message_id}:"):
             return evidence.message_date
     return ""
 
@@ -355,8 +362,8 @@ def _message_quantity(
     for evidence in result.evidences:
         if (
             message_id == evidence.message_id
-            or message_id.startswith(evidence.message_id)
-            or evidence.message_id.startswith(message_id)
+            or message_id.startswith(f"{evidence.message_id}:")
+            or evidence.message_id.startswith(f"{message_id}:")
         ):
             return evidence.quantity_hint
     return None
@@ -370,11 +377,106 @@ def _apply_message_quantity(
     quantity = _message_quantity(result, message_id)
     if quantity is None:
         return
-    for draft in drafts:
-        # Structured documents such as delivery notes calculate their own
-        # totals. A WhatsApp caption replaces only the default one-piece value.
-        if draft.quantity == 1:
-            draft.quantity = quantity
+    # A caption belongs to the message/album, not automatically to every
+    # photo or every table row. Only one logical row has an unambiguous scope.
+    candidates = [draft for draft in drafts if draft.quantity == 1]
+    if len(drafts) == 1 and len(candidates) == 1:
+        candidates[0].quantity = quantity
+        return
+    if candidates:
+        warning = "Confirmar alcance da quantidade da mensagem"
+        for draft in candidates:
+            if warning not in draft.warnings:
+                draft.warnings.append(warning)
+            draft.status = "CONFIRMAR"
+
+
+def _record_id(message_id: str, attachment_hash: str, row_index: int) -> str:
+    raw = f"{message_id}\0{attachment_hash}\0{row_index}".encode("utf-8")
+    return "wl-" + hashlib.sha256(raw).hexdigest()[:24]
+
+
+def _load_review_rows(cache_path: Path) -> dict[str, dict]:
+    if not cache_path.exists():
+        return {}
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    rows: dict[str, dict] = {}
+    if not isinstance(payload, dict):
+        return rows
+    for group in payload.values():
+        if not isinstance(group, list):
+            continue
+        for index, item in enumerate(group):
+            if not isinstance(item, dict):
+                continue
+            identity = str(item.get("record_id") or "")
+            if not identity:
+                identity = (
+                    f"legacy:{item.get('message_id', '')}:"
+                    f"{item.get('source_path', '')}:{index}"
+                )
+            rows[identity] = item
+    return rows
+
+
+def _preserve_reviewed_values(draft: LabelDraft, previous: dict | None) -> None:
+    """Keep operator decisions across OCR reprocessing.
+
+    New caches track fields changed by the user. For legacy caches, explicit
+    workflow states are treated conservatively as reviewed and preserved.
+    """
+    if not previous:
+        return
+    editable = (
+        "message_date", "work", "product", "piece", "section", "length",
+        "dimensions", "unit_volume", "type_name", "quantity", "cargo_type",
+    )
+    manual = {
+        str(name) for name in previous.get("manual_fields", [])
+        if str(name) in editable
+    }
+    previous_status = str(previous.get("status") or "").upper()
+    if previous_status in {"PENDENTE", "CONFIRMADO", "APROVADO", "REJEITADO"}:
+        manual.update(editable)
+    for name in manual:
+        if name in previous:
+            setattr(draft, name, previous[name])
+    draft.manual_fields = sorted(manual)
+    if previous_status in {"PENDENTE", "CONFIRMADO", "APROVADO", "REJEITADO"}:
+        draft.status = previous_status
+        draft.warnings = [str(item) for item in previous.get("warnings", [])]
+
+
+def _stake_text_drafts(result: WhatsAppProbeResult, source_path: str) -> list[LabelDraft]:
+    drafts: list[LabelDraft] = []
+    for evidence in result.evidences:
+        if not evidence.stake_text:
+            continue
+        try:
+            entry = parse_stake_text(evidence.stake_text)
+        except ValueError:
+            continue
+        warnings = [] if evidence.message_date else ["Confirmar data da mensagem"]
+        warnings.append("Confirmar obra")
+        drafts.append(LabelDraft(
+            message_id=evidence.message_id,
+            message_date=evidence.message_date,
+            source_path=source_path,
+            product=entry.type_name,
+            type_name=entry.type_name,
+            piece=entry.piece,
+            dimensions=entry.dimensions,
+            unit_volume=entry.unit_volume,
+            quantity=entry.quantity,
+            status="CONFIRMAR",
+            warnings=warnings,
+            ocr_text=evidence.message_text or evidence.stake_text,
+            record_id=_record_id(evidence.message_id, "texto-estaca", 0),
+        ))
+    return drafts
 
 
 def _vision_analysis_to_draft(
@@ -429,6 +531,12 @@ def _structured_document_drafts(
     message_id: str,
 ) -> list[LabelDraft]:
     """Keep multi-row delivery notes that cannot be represented by one label."""
+    layout_drafts = _stake_delivery_layout_drafts(
+        analysis.layout_lines, result, message_id, analysis.source_path
+    )
+    if layout_drafts:
+        _apply_message_quantity(layout_drafts, result, message_id)
+        return layout_drafts
     alternatives: list[list[LabelDraft]] = []
     for reading in analysis.readings:
         if reading.field_hint or not reading.text:
@@ -452,6 +560,178 @@ def _structured_document_drafts(
     return max(alternatives, key=len) if alternatives else []
 
 
+def _layout_plain(value: str) -> str:
+    decomposed = unicodedata.normalize("NFD", value or "")
+    return "".join(
+        character for character in decomposed
+        if not unicodedata.combining(character)
+    ).upper().strip()
+
+
+def _layout_center(line: LayoutLine) -> tuple[float, float]:
+    return ((line.left + line.right) / 2, (line.top + line.bottom) / 2)
+
+
+def _stake_delivery_layout_drafts(
+    lines: list[LayoutLine],
+    result: WhatsAppProbeResult,
+    message_id: str,
+    source_path: str,
+) -> list[LabelDraft]:
+    """Reconstruct stake rows from OCR coordinates instead of flattened text.
+
+    Delivery notes are tables. Pairing numbers by text order can put quantity,
+    length and metres in the wrong fields. Here each cell is assigned to the
+    printed column and to the nearest physical row. Equal dimensions are then
+    consolidated by summing the printed ``Metros`` cells, which is the value
+    charged in the workbook.
+    """
+    if not lines:
+        return []
+    header_aliases = {
+        "piece": ("PECA",),
+        "dimension": ("DIMENSAO",),
+        "quantity": ("QUANTIDADE",),
+        "length": ("COMPRIMENTO",),
+        "meters": ("METROS",),
+        "weight": ("PESO",),
+    }
+    headers: dict[str, LayoutLine] = {}
+    for name, aliases in header_aliases.items():
+        candidates = [
+            line for line in lines
+            if any(alias in _layout_plain(line.text) for alias in aliases)
+        ]
+        if candidates:
+            headers[name] = min(candidates, key=lambda line: line.top)
+    if set(headers) != set(header_aliases):
+        return []
+
+    ordered = sorted(
+        ((name, _layout_center(line)[0]) for name, line in headers.items()),
+        key=lambda item: item[1],
+    )
+    if [name for name, _ in ordered] != [
+        "piece", "dimension", "quantity", "length", "meters", "weight"
+    ]:
+        return []
+    bounds: dict[str, tuple[float, float]] = {}
+    for index, (name, center) in enumerate(ordered):
+        left = -float("inf") if index == 0 else (ordered[index - 1][1] + center) / 2
+        right = float("inf") if index == len(ordered) - 1 else (center + ordered[index + 1][1]) / 2
+        bounds[name] = (left, right)
+
+    table_top = max(line.bottom for line in headers.values())
+    columns: dict[str, list[LayoutLine]] = {name: [] for name in headers}
+    for line in lines:
+        x, y = _layout_center(line)
+        if y <= table_top + 4:
+            continue
+        for name, (left, right) in bounds.items():
+            if left <= x < right:
+                columns[name].append(line)
+                break
+
+    anchors = [
+        line for line in columns["piece"]
+        if re.fullmatch(r"E?STACA", _layout_plain(line.text).replace(" ", ""))
+    ]
+    if not anchors:
+        return []
+    anchors.sort(key=lambda line: _layout_center(line)[1])
+
+    def nearest(column: str, y: float) -> LayoutLine | None:
+        candidates = sorted(
+            columns[column], key=lambda line: abs(_layout_center(line)[1] - y)
+        )
+        if not candidates:
+            return None
+        candidate = candidates[0]
+        return candidate if abs(_layout_center(candidate)[1] - y) <= 32 else None
+
+    parsed_rows: list[tuple[str, int]] = []
+    for anchor in anchors:
+        y = _layout_center(anchor)[1]
+        dimension_line = nearest("dimension", y)
+        meters_line = nearest("meters", y)
+        if not dimension_line or not meters_line:
+            continue
+        dimension_match = re.search(
+            r"\b\d{1,3}\s*[X×]\s*\d{1,3}\b", _layout_plain(dimension_line.text)
+        )
+        meters_match = re.fullmatch(r"\s*(\d{1,4})\s*", meters_line.text)
+        if not dimension_match or not meters_match:
+            continue
+        dimension = re.sub(r"\s*[X×]\s*", "X", dimension_match.group(0))
+        meters = int(meters_match.group(1))
+        if meters > 0:
+            parsed_rows.append((dimension, meters))
+    if not parsed_rows:
+        return []
+
+    work = ""
+    work_lines = [line for line in lines if re.search(r"\bOBRA\b", _layout_plain(line.text))]
+    if work_lines:
+        work_label = min(work_lines, key=lambda line: line.top)
+        first = re.sub(r"(?i)^.*?OBRA\s*:?\s*", "", work_label.text).strip()
+        parts = [first] if first else []
+        equipment_headers = [
+            line.top for line in lines
+            if line.top > work_label.top and any(
+                marker in _layout_plain(line.text)
+                for marker in ("CAMINHAO", "CARRETA", "MOTORISTA", "INICIO", "OCULTAR", "CHEGADA")
+            )
+        ]
+        next_header_top = min(equipment_headers) if equipment_headers else min(
+            line.top for line in headers.values()
+        )
+        for line in sorted(lines, key=lambda item: item.top):
+            if (
+                line is not work_label
+                and line.top >= work_label.bottom
+                and line.top < next_header_top
+                and abs(line.left - work_label.left) <= 80
+                and len(_layout_plain(line.text)) >= 3
+            ):
+                plain = _layout_plain(line.text)
+                if not any(marker in plain for marker in (
+                    "CAMINHAO", "CARRETA", "MOTORISTA", "INICIO", "OCULTAR", "CHEGADA"
+                )):
+                    parts.append(line.text.strip())
+        work = " ".join(parts).strip()
+
+    grouped: dict[str, int] = defaultdict(int)
+    for dimension, meters in parsed_rows:
+        grouped[dimension] += meters
+    message_date = _message_date(result, message_id)
+    drafts: list[LabelDraft] = []
+    audit_text = "\n".join(line.text for line in sorted(lines, key=lambda line: (line.top, line.left)))
+    for dimension, total_meters in grouped.items():
+        warnings: list[str] = []
+        if not work:
+            warnings.append("Confirmar obra")
+        if not message_date:
+            warnings.append("Confirmar data da mensagem")
+        drafts.append(LabelDraft(
+            message_id=message_id,
+            message_date=message_date,
+            source_path=source_path,
+            work=work,
+            product="ESTACA",
+            type_name="ESTACA",
+            piece=dimension,
+            section=dimension,
+            length="",
+            dimensions=dimension,
+            unit_volume=None,
+            quantity=total_meters,
+            status="PRONTO PARA REVISÃO" if not warnings else "CONFIRMAR",
+            warnings=warnings,
+            ocr_text=audit_text,
+        ))
+    return drafts
+
+
 def build_advanced_review_drafts(
     result: WhatsAppProbeResult,
     progress: ProgressCallback | None = None,
@@ -465,12 +745,40 @@ def build_advanced_review_drafts(
         attachment for attachment in result.captured_attachments
         if attachment.mime_type.lower().startswith("image/")
     ]
-    if not images:
+    pdfs = [
+        attachment for attachment in result.captured_attachments
+        if attachment.mime_type.lower() == "application/pdf"
+        or attachment.filename.lower().endswith(".pdf")
+    ]
+    has_non_media_evidence = any(
+        evidence.stake_text or evidence.pdf_names for evidence in result.evidences
+    )
+    if not images and not pdfs and not has_non_media_evidence:
         return []
-    capture_dir = Path(images[0].path).parent
+    if images or pdfs:
+        capture_dir = Path((images or pdfs)[0].path).parent
+    else:
+        identity = hashlib.sha256("|".join(
+            evidence.message_id for evidence in result.evidences
+        ).encode("utf-8")).hexdigest()[:16]
+        capture_dir = configuration_directory() / "Capturas" / f"texto_{identity}"
+        capture_dir.mkdir(parents=True, exist_ok=True)
     analysis_dir = capture_dir / "analise_visual_v2"
     evidence_dir = analysis_dir / "evidencias"
     analysis_dir.mkdir(parents=True, exist_ok=True)
+    for pdf in pdfs:
+        try:
+            pages = render_pdf_pages(Path(pdf.path), analysis_dir / "paginas_pdf")
+        except Exception:
+            continue
+        for page_index, page in enumerate(pages, start=1):
+            page_hash = hashlib.sha256(page.read_bytes()).hexdigest()
+            images.append(WhatsAppAttachment(
+                message_id=f"{pdf.message_id}:pdf-pagina-{page_index}",
+                filename=f"{pdf.filename} - página {page_index}",
+                mime_type="image/png", path=str(page), size=page.stat().st_size,
+                sha256=page_hash,
+            ))
     processed: list[tuple[object, VisionAnalysis, Path]] = []
     failures: dict[str, str] = {}
     total = len(images)
@@ -485,9 +793,9 @@ def build_advanced_review_drafts(
                 payload = json.loads(analysis_path.read_text(encoding="utf-8"))
                 if (
                     str(payload.get("source_path") or "") == attachment.path
-                    # Version 6 changes interpretation rules, not OCR pixels;
-                    # version-5 readings can be safely reinterpreted instantly.
-                    and int(payload.get("pipeline_version") or 0) >= 5
+                    # Version 8 preserves the complete geometry of romaneios.
+                    # readings must be regenerated to avoid field swaps.
+                    and int(payload.get("pipeline_version") or 0) >= 8
                 ):
                     analysis = VisionAnalysis.from_dict(payload)
             except (OSError, json.JSONDecodeError, KeyError, TypeError):
@@ -510,6 +818,8 @@ def build_advanced_review_drafts(
     analyses = [analysis for _, analysis, _ in processed]
     enrich_isolated_fields_batch(analyses)
     apply_group_context(analyses)
+    cache_path = capture_dir / "revisao_temporaria.json"
+    previous_rows = _load_review_rows(cache_path)
     drafts: list[LabelDraft] = []
     review_cache: dict[str, list[dict]] = {}
     cache_key_by_path: dict[str, str] = {}
@@ -523,6 +833,16 @@ def build_advanced_review_drafts(
             image_drafts = [
                 _vision_analysis_to_draft(analysis, result, attachment.message_id)
             ]
+        for row_index, draft in enumerate(image_drafts):
+            draft.record_id = _record_id(
+                attachment.message_id, attachment.sha256 or attachment.path, row_index
+            )
+            previous = previous_rows.get(draft.record_id)
+            if previous is None:
+                previous = previous_rows.get(
+                    f"legacy:{draft.message_id}:{draft.source_path}:{row_index}"
+                )
+            _preserve_reviewed_values(draft, previous)
         if attachment.path in failures:
             for draft in image_drafts:
                 draft.warnings.insert(
@@ -533,16 +853,44 @@ def build_advanced_review_drafts(
         cache_key = f"{attachment.message_id}:{attachment.sha256}"
         cache_key_by_path[attachment.path] = cache_key
 
+    # Textual stake entries are first-class evidence and do not pass through
+    # OCR. They remain pending only for information the message did not prove.
+    snapshot_path = capture_dir / "sessao_whatsapp.json"
+    for draft in _stake_text_drafts(result, str(snapshot_path)):
+        _preserve_reviewed_values(draft, previous_rows.get(draft.record_id))
+        drafts.append(draft)
+
+    captured_pdf_ids = {pdf.message_id for pdf in pdfs}
+    for evidence in result.evidences:
+        if not evidence.pdf_names or evidence.message_id in captured_pdf_ids:
+            continue
+        for pdf_index, pdf_name in enumerate(evidence.pdf_names):
+            drafts.append(LabelDraft(
+                message_id=evidence.message_id,
+                message_date=evidence.message_date,
+                source_path=str(snapshot_path),
+                status="PENDENTE",
+                warnings=[f"PDF não foi copiado: {pdf_name}"],
+                ocr_text=evidence.message_text,
+                record_id=_record_id(evidence.message_id, "pdf-ausente", pdf_index),
+            ))
+
     # Apply the conservative repeated-piece and message consensus already
     # used by the legacy reader. It fills only conflict-free values supported
     # by multiple photos and never overwrites a populated measurement.
     _apply_message_consensus(drafts)
+    # Consensus recalculates generated statuses. Reapply explicit operator
+    # decisions last so a refresh can never move a reviewed pending/approved
+    # row back to an automatic state.
+    for draft in drafts:
+        _preserve_reviewed_values(draft, previous_rows.get(draft.record_id))
     for draft in drafts:
         cache_key = cache_key_by_path.get(draft.source_path)
+        if cache_key is None and draft.record_id:
+            cache_key = f"texto:{draft.message_id}"
         if cache_key:
             review_cache.setdefault(cache_key, []).append(asdict(draft))
 
-    cache_path = capture_dir / "revisao_temporaria.json"
     temporary = cache_path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(review_cache, ensure_ascii=False, indent=2),

@@ -15,6 +15,7 @@ from typing import Any
 
 from .whatsapp_service import GROUP_NAME, WhatsAppProbeResult, merge_period_results
 from .config import configuration_directory
+from .capture_ledger import CaptureLedger
 
 
 BRIDGE_HOST = "127.0.0.1"
@@ -70,6 +71,7 @@ class ChromeBridge:
             else configuration_directory() / "Capturas" / self.session_id
         )
         self.attachments: list[dict[str, Any]] = []
+        self.ledger = CaptureLedger(self.attachment_directory / "captura.sqlite3")
         self.server: _ReusableHTTPServer | None = None
         self.thread: threading.Thread | None = None
 
@@ -185,6 +187,7 @@ class ChromeBridge:
                     )
                     if not duplicate:
                         bridge.attachments.append(metadata)
+                    bridge.ledger.record_attachment(metadata)
                     bridge._save_session_snapshot()
                     self._json_response(200, {"ok": True, "sha256": digest, "size": len(content)})
                     return
@@ -195,6 +198,7 @@ class ChromeBridge:
                     bridge.latest_payload and bridge.latest_payload.get("group_found")
                 )
                 payload_has_group = bool(payload.get("group_found"))
+                bridge.ledger.record_payload(payload)
                 if payload_has_group or not current_has_group:
                     bridge.latest_payload = payload
                     bridge.latest_payload["captured_attachments"] = list(bridge.attachments)

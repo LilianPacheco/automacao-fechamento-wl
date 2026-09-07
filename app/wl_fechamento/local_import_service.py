@@ -237,13 +237,14 @@ def import_local_evidence(
         assigned: set[Path] = set()
         evidence_rows: list[WhatsAppEvidence] = []
         attachment_rows: list[WhatsAppAttachment] = []
-        seen_hashes: set[str] = set()
+        seen_attachments: set[tuple[str, str, str]] = set()
 
         def copy_attachment(path: Path, message_id: str) -> bool:
             content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-            if content_hash in seen_hashes:
+            identity = (message_id, path.name.casefold(), content_hash)
+            if identity in seen_attachments:
                 return False
-            seen_hashes.add(content_hash)
+            seen_attachments.add(identity)
             destination = capture_dir / f"{message_id}_{content_hash[:12]}{path.suffix.lower()}"
             shutil.copy2(path, destination)
             attachment_rows.append(WhatsAppAttachment(

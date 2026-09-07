@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +17,98 @@ class WorkbookWriteResult:
     workbook_path: Path
     backup_path: Path
     imported_rows: list[int]
+    skipped_source_ids: tuple[str, ...] = ()
+
+
+IMPORT_LOG_SHEET = "__WL_IMPORT_LOG"
+
+
+def _already_imported_ids(source: Path) -> set[str]:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(source, read_only=True, data_only=False)
+    try:
+        if IMPORT_LOG_SHEET not in workbook.sheetnames:
+            return set()
+        sheet = workbook[IMPORT_LOG_SHEET]
+        return {
+            str(row[0]).strip()
+            for row in sheet.iter_rows(min_row=2, values_only=True)
+            if row and row[0]
+        }
+    finally:
+        workbook.close()
+
+
+def _filter_unimported_rows(
+    rows: list[ConsolidatedRow], imported_ids: set[str]
+) -> tuple[list[ConsolidatedRow], tuple[str, ...]]:
+    pending: list[ConsolidatedRow] = []
+    skipped: list[str] = []
+    for row in rows:
+        ids = set(row.source_ids)
+        seen = ids & imported_ids
+        if ids and seen == ids:
+            skipped.extend(sorted(seen))
+            continue
+        if seen:
+            raise RuntimeError(
+                "Uma linha consolidada mistura evidências já importadas e novas. "
+                "Separe ou revise essa linha antes de continuar."
+            )
+        pending.append(row)
+    return pending, tuple(dict.fromkeys(skipped))
+
+
+def _recalculate_and_verify(
+    workbook_path: Path, period: PeriodSelection, imported_rows: list[int]
+) -> None:
+    """Ask desktop Excel to calculate and reject unresolved output cells."""
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$excel = New-Object -ComObject Excel.Application
+$excel.Visible = $false
+$excel.DisplayAlerts = $false
+try {
+  $book = $excel.Workbooks.Open($args[0])
+  $excel.CalculateFullRebuild()
+  $book.Save()
+  $book.Close($true)
+} finally {
+  if ($book) { try { $book.Close($false) } catch {} }
+  $excel.Quit()
+  [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($excel) | Out-Null
+}
+"""
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, str(workbook_path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        timeout=120, check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "O Excel não conseguiu recalcular a cópia preparada: "
+            + (completed.stderr.strip() or "falha desconhecida")
+        )
+
+    from openpyxl import load_workbook
+    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        sheet = workbook[period.sheet_name]
+        errors: list[str] = []
+        for row_number in imported_rows:
+            for column in (9, 11, 12, 13):
+                value = sheet.cell(row_number, column).value
+                if value is None or (isinstance(value, str) and value.startswith("#")):
+                    errors.append(f"{sheet.cell(row_number, column).coordinate}={value}")
+        if errors:
+            raise RuntimeError(
+                "A cópia foi calculada, mas há resultado vazio ou com erro: "
+                + ", ".join(errors[:12])
+            )
+    finally:
+        workbook.close()
 
 
 def _iso_date(value: str) -> str:
@@ -111,6 +204,18 @@ def _fallback_openpyxl_write(
         sheet.cell(target_row, 8).number_format = "0.000"
         sheet.cell(target_row, 9).number_format = "0.000"
         imported_rows.append(target_row)
+    log_sheet = (
+        workbook[IMPORT_LOG_SHEET]
+        if IMPORT_LOG_SHEET in workbook.sheetnames
+        else workbook.create_sheet(IMPORT_LOG_SHEET)
+    )
+    if log_sheet.max_row == 1 and log_sheet.cell(1, 1).value is None:
+        log_sheet.append(["ID_EVIDENCIA", "ABA", "LINHA", "IMPORTADO_EM"])
+    imported_at = datetime.now().isoformat(timespec="seconds")
+    for item, target_row in zip(rows, imported_rows):
+        for source_id in item.source_ids:
+            log_sheet.append([source_id, period.sheet_name, target_row, imported_at])
+    log_sheet.sheet_state = "veryHidden"
     workbook.save(temporary_output)
     workbook.close()
     return imported_rows
@@ -120,6 +225,8 @@ def write_approved_rows(
     workbook_path: str | Path,
     period: PeriodSelection,
     rows: list[ConsolidatedRow],
+    *,
+    recalculate_with_excel: bool = False,
 ) -> WorkbookWriteResult:
     if not rows:
         raise ValueError("Não há linhas aprovadas para importar.")
@@ -127,17 +234,26 @@ def write_approved_rows(
     validation = validate_workbook(source, period)
     if not validation.valid:
         raise RuntimeError("A planilha deixou de ser válida; nenhuma escrita foi feita.")
+    pending_rows, skipped_ids = _filter_unimported_rows(
+        rows, _already_imported_ids(source)
+    )
+    if not pending_rows:
+        return WorkbookWriteResult(source, source, [], skipped_ids)
     backup = create_backup(source)
-    temporary_output = source.with_name(f".{source.stem}.wl-{uuid.uuid4().hex}.xlsx")
+    temporary_output = source.with_name(
+        f".{source.stem}.wl-{uuid.uuid4().hex}{source.suffix}"
+    )
     try:
         imported_rows = _fallback_openpyxl_write(
             source,
             temporary_output,
             period,
-            rows,
+            pending_rows,
             int(validation.details["header_row"]),
         )
         prepared_validation = validate_workbook(temporary_output, period)
+        if recalculate_with_excel:
+            _recalculate_and_verify(temporary_output, period, imported_rows)
     except Exception:
         temporary_output.unlink(missing_ok=True)
         raise
@@ -154,4 +270,4 @@ def write_approved_rows(
             "A cópia foi preparada, mas o arquivo está aberto no Excel. "
             "Feche a planilha e tente novamente; o backup foi preservado."
         ) from exc
-    return WorkbookWriteResult(source, backup, imported_rows)
+    return WorkbookWriteResult(source, backup, imported_rows, skipped_ids)

@@ -20,6 +20,7 @@ from wl_fechamento.chrome_bridge import (
     load_resume_attachment_positions,
     load_saved_whatsapp_session,
 )
+from wl_fechamento.capture_ledger import CaptureLedger
 from wl_fechamento.models import AppConfiguration, PeriodSelection
 from wl_fechamento.stake_parser import parse_stake_text
 from wl_fechamento.whatsapp_service import (
@@ -407,6 +408,29 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class WhatsAppProbeTests(unittest.TestCase):
+    def test_capture_ledger_keeps_inventory_before_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = CaptureLedger(Path(temporary) / "captura.sqlite3")
+            ledger.record_payload({
+                "final": False,
+                "period_scan_complete": False,
+                "evidences": [{
+                    "message_id": "msg-1", "message_date": "17/08/2026",
+                    "image_count": 2, "message_text": "legenda 2 peças",
+                }],
+            })
+            before = ledger.coverage()
+            ledger.record_attachment({
+                "message_id": "msg-1", "sha256": "abc",
+                "filename": "foto_1.jpg", "mime_type": "image/jpeg",
+                "path": str(Path(temporary) / "foto_1.jpg"), "size": 10,
+            })
+            after = ledger.coverage()
+
+            self.assertEqual(before[0]["expected_images"], 2)
+            self.assertEqual(before[0]["captured_images"], 0)
+            self.assertEqual(after[0]["captured_images"], 1)
+
     def test_resume_positions_reuse_only_real_whatsapp_captures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1044,6 +1068,29 @@ class ReviewConsensusTests(unittest.TestCase):
         self.assertEqual(drafts[-1].length, "11,534")
         self.assertEqual(drafts[6].length, "1,534")
 
+    def test_album_quantity_is_not_repeated_on_every_row(self) -> None:
+        drafts = [
+            parse_label_text("", message_id="album-1"),
+            parse_label_text("", message_id="album-1"),
+        ]
+        from wl_fechamento.whatsapp_service import WhatsAppEvidence
+        result = WhatsAppProbeResult(
+            connected=True, group_found=True, start_date_found=True,
+            start_date="20/08/2026",
+            evidences=[WhatsAppEvidence(
+                message_id="album-1", message_date="20/08/2026",
+                quantity_hint=10,
+            )],
+        )
+
+        _apply_message_quantity(drafts, result, "album-1")
+
+        self.assertEqual([draft.quantity for draft in drafts], [1, 1])
+        self.assertTrue(all(
+            "Confirmar alcance da quantidade da mensagem" in draft.warnings
+            for draft in drafts
+        ))
+
 
 class WorkbookTests(unittest.TestCase):
     def test_approved_row_payload_keeps_only_source_fields(self) -> None:
@@ -1133,6 +1180,30 @@ class WorkbookTests(unittest.TestCase):
             self.assertEqual(sheet["E7"].value, "PP")
             self.assertEqual(sheet["F7"].value, "10")
             self.assertEqual(sheet["I7"].value, "=H7*D7")
+            workbook.close()
+
+    def test_writer_does_not_import_same_evidence_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "medicoes.xlsx"
+            self._create_valid_workbook(path)
+            row = ConsolidatedRow(
+                type_name="PILAR", message_date="31/07/2026",
+                work="OBRA TESTE", quantity=1, piece="PP-10",
+                dimensions="40X40 10,000", unit_volume=1.25,
+                cargo_type="PEÇAS ESTOQUE", source_count=1,
+                source_ids=("wl-evidencia-1",),
+            )
+
+            first = write_approved_rows(path, PeriodSelection(2026, 7, 2), [row])
+            second = write_approved_rows(path, PeriodSelection(2026, 7, 2), [row])
+
+            self.assertEqual(first.imported_rows, [7])
+            self.assertEqual(second.imported_rows, [])
+            self.assertEqual(second.skipped_source_ids, ("wl-evidencia-1",))
+            workbook = load_workbook(path, data_only=False)
+            sheet = workbook["2ª quinz.julho"]
+            self.assertIsNone(sheet["A8"].value)
+            self.assertEqual(workbook["__WL_IMPORT_LOG"].sheet_state, "veryHidden")
             workbook.close()
 
 

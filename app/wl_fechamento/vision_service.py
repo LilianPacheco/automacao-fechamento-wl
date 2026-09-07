@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 
 from .label_parser import (
     LabelDraft,
@@ -26,13 +26,15 @@ from .ocr_service import (
     read_image_text_targeted,
 )
 from .paddle_ocr_service import (
+    LayoutLine,
     is_available as paddle_available,
+    read_layout_lines as read_paddle_layout_lines,
     read_line_texts as read_paddle_line_texts,
     read_text as read_paddle_text,
 )
 
 
-VISION_PIPELINE_VERSION = 6
+VISION_PIPELINE_VERSION = 8
 
 READ_FIELDS = ("work", "product", "piece", "section", "length", "unit_volume")
 FIELD_LABELS = {
@@ -99,6 +101,9 @@ class VisionAnalysis:
     fields: dict[str, FieldDecision]
     readings: list[VisionReading]
     product_type: str = ""
+    # Raw OCR geometry is required to reconstruct delivery-note table rows.
+    # Flattened text alone loses which number belongs to which column.
+    layout_lines: list[LayoutLine] = field(default_factory=list)
 
     @property
     def pending_fields(self) -> list[str]:
@@ -139,6 +144,10 @@ class VisionAnalysis:
             },
             readings=[VisionReading(**reading) for reading in payload.get("readings", [])],
             product_type=str(payload.get("product_type") or ""),
+            layout_lines=[
+                LayoutLine(**line) for line in payload.get("layout_lines", [])
+                if isinstance(line, dict)
+            ],
         )
 
 
@@ -309,6 +318,52 @@ def _field_crop_value(field_name: str, text: str) -> str | float | None:
     return None
 
 
+def _layout_field_readings(lines: list[LayoutLine]) -> list[VisionReading]:
+    """Associate OCR values with their printed labels using geometry."""
+    readings: list[VisionReading] = []
+    for field_name, markers in FIELD_MARKERS.items():
+        label_lines = [
+            line for line in lines
+            if any(re.search(rf"\b{re.escape(marker)}\b", _plain(line.text)) for marker in markers)
+        ]
+        for label in label_lines:
+            label_height = max(1.0, label.bottom - label.top)
+            same_row = [
+                line for line in lines
+                if line is not label
+                and line.left >= label.right - label_height
+                and abs(((line.top + line.bottom) / 2) - ((label.top + label.bottom) / 2))
+                    <= label_height * 1.2
+            ]
+            below = [
+                line for line in lines
+                if line is not label
+                and line.top >= label.bottom - label_height * 0.2
+                and line.top <= label.bottom + label_height * 2.2
+                and abs(line.left - label.left) <= max(label_height * 5, label.right - label.left)
+            ]
+            nearby = sorted(
+                same_row or below,
+                key=lambda line: (
+                    abs(line.top - label.top), abs(line.left - label.right)
+                ),
+            )
+            combined = label.text
+            confidence = label.confidence
+            if nearby:
+                combined = f"{label.text}: {nearby[0].text}"
+                confidence = min(label.confidence, nearby[0].confidence)
+            if _field_crop_value(field_name, combined) not in (None, ""):
+                readings.append(VisionReading(
+                    engine=f"ppocr_layout_{field_name}",
+                    text=combined,
+                    confidence=confidence,
+                    field_hint=field_name,
+                ))
+                break
+    return readings
+
+
 def decide_fields(
     readings: list[VisionReading],
     crop_paths: dict[str, str] | None = None,
@@ -393,13 +448,57 @@ def decide_fields(
     return decisions
 
 
-def _save_evidence_crops(image_path: Path, output_dir: Path) -> tuple[str, dict[str, str]]:
+def _looks_like_structured_document(image: Image.Image) -> bool:
+    """Distinguish a photographed/printed form from a small concrete label."""
+    oriented = ImageOps.exif_transpose(image)
+    if oriented.width < oriented.height * 1.20:
+        return False
+    sample = ImageOps.grayscale(oriented).resize((96, 64))
+    bright_fraction = sum(pixel >= 205 for pixel in sample.getdata()) / (96 * 64)
+    line_sample = ImageOps.grayscale(oriented).resize(
+        (256, min(768, oriented.height)), Image.Resampling.NEAREST
+    )
+    pixels = line_sample.load()
+    long_dark_rows = sum(
+        sum(pixels[x, y] < 100 for x in range(line_sample.width))
+        >= line_sample.width * 0.50
+        for y in range(line_sample.height)
+    )
+    return bright_fraction >= 0.52 and long_dark_rows >= 4
+
+
+def _prepare_structured_document(image: Image.Image) -> Image.Image:
+    """Preserve the complete form and its table geometry for neural OCR."""
+    prepared = ImageOps.exif_transpose(image).convert("RGB")
+    target_width = min(2400, max(1800, prepared.width))
+    if target_width != prepared.width:
+        scale = target_width / prepared.width
+        prepared = prepared.resize(
+            (target_width, max(1, round(prepared.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    prepared = ImageOps.autocontrast(prepared, cutoff=0.25)
+    prepared = ImageEnhance.Contrast(prepared).enhance(1.08)
+    prepared = ImageEnhance.Sharpness(prepared).enhance(1.35)
+    return prepared
+
+
+def _save_evidence_crops(
+    image_path: Path, output_dir: Path
+) -> tuple[str, dict[str, str], bool]:
     digest = hashlib.sha256(image_path.read_bytes()).hexdigest()[:12]
     target = output_dir / f"{image_path.stem}_{digest}"
     target.mkdir(parents=True, exist_ok=True)
     with Image.open(image_path) as source:
-        label = _orange_label_crop(source) or source.convert("RGB")
-        prepared = _prepare_paddle_label(label)
+        structured_document = _looks_like_structured_document(source)
+        if structured_document:
+            # A romaneio is already the document. Orange/red table cells used
+            # to be mistaken for a label border, clipping OBRA and scrambling
+            # the table before OCR.
+            prepared = _prepare_structured_document(source)
+        else:
+            label = _orange_label_crop(source) or source.convert("RGB")
+            prepared = _prepare_paddle_label(label)
     label_path = target / "etiqueta.png"
     prepared.save(label_path, format="PNG", optimize=True)
     crop_paths: dict[str, str] = {}
@@ -411,7 +510,7 @@ def _save_evidence_crops(image_path: Path, output_dir: Path) -> tuple[str, dict[
         crop_path = target / f"campo_{field_name}.png"
         prepared.crop(box).save(crop_path, format="PNG", optimize=True)
         crop_paths[field_name] = str(crop_path)
-    return str(label_path), crop_paths
+    return str(label_path), crop_paths, structured_document
 
 
 def _read_isolated_fields(
@@ -443,7 +542,8 @@ def _read_isolated_fields(
 
 def analyze_image(image_path: Path, output_dir: Path) -> VisionAnalysis:
     """Create an auditable local analysis without touching the workbook."""
-    label_path, crop_paths = _save_evidence_crops(image_path, output_dir)
+    label_path, crop_paths, structured_document = _save_evidence_crops(image_path, output_dir)
+    layout_lines: list[LayoutLine] = []
     if paddle_available():
         # A fast neural pass and the independent Windows OCR read the same
         # rectified label.  The accurate neural recognizer is then reserved,
@@ -452,6 +552,11 @@ def analyze_image(image_path: Path, output_dir: Path) -> VisionAnalysis:
         small_text, small_confidence = read_paddle_text(
             Path(label_path), quality="small"
         )
+        try:
+            layout_lines = read_paddle_layout_lines(Path(label_path), quality="small")
+            layout_readings = _layout_field_readings(layout_lines)
+        except Exception:
+            layout_readings = []
         try:
             windows_text = _read_variant(Path(label_path))
         except Exception:
@@ -467,7 +572,7 @@ def analyze_image(image_path: Path, output_dir: Path) -> VisionAnalysis:
                 text=windows_text,
                 confidence=0.70 if windows_text else 0.0,
             ),
-        ]
+        ] + layout_readings
     else:
         primary = read_image_text(image_path)
         targeted = read_image_text_targeted(image_path)
@@ -499,6 +604,7 @@ def analyze_image(image_path: Path, output_dir: Path) -> VisionAnalysis:
         fields=decisions,
         readings=readings,
         product_type=product_type,
+        layout_lines=layout_lines if structured_document else [],
     )
 
 

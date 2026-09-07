@@ -196,8 +196,8 @@ def restrict_result_to_period(
     def belongs_to_valid_evidence(message_id: str) -> bool:
         return any(
             message_id == evidence_id
-            or message_id.startswith(evidence_id)
-            or evidence_id.startswith(message_id)
+            or message_id.startswith(f"{evidence_id}:")
+            or evidence_id.startswith(f"{message_id}:")
             for evidence_id in valid_ids
         )
 
@@ -291,21 +291,33 @@ def merge_period_results(
                 evidence_by_id[evidence.message_id] = evidence
 
     authoritative_ids = set(evidence_by_id)
-    # The same photo can be reported under both a message id and a synthetic
-    # album id.  Its content hash is the identity; counting (message, hash)
-    # duplicated real pieces in the review.
-    attachment_by_key: dict[str, WhatsAppAttachment] = {}
+    # Identical bytes may legitimately be sent in different messages or even
+    # occupy two positions in one album. Identity therefore includes message
+    # and album position; a content hash alone must never erase a delivery.
+    attachment_by_key: dict[tuple[str, str, str], WhatsAppAttachment] = {}
     coverage_attachments: list[WhatsAppAttachment] = []
     for source in sources:
         for attachment in source.captured_attachments:
             if primary.period_scan_complete and not any(
                 related_id == attachment.message_id or
-                related_id.startswith(attachment.message_id) or
-                attachment.message_id.startswith(related_id)
+                related_id.startswith(f"{attachment.message_id}:") or
+                attachment.message_id.startswith(f"{related_id}:")
                 for related_id in authoritative_ids
             ):
                 continue
-            key = attachment.sha256 or attachment.path
+            position_match = re.search(
+                r"foto_(\d+)|pdf-pagina-(\d+)", attachment.filename,
+                re.IGNORECASE,
+            )
+            position = next(
+                (value for value in (position_match.groups() if position_match else ()) if value),
+                attachment.filename,
+            )
+            key = (
+                attachment.message_id,
+                str(position).casefold(),
+                attachment.sha256 or attachment.path,
+            )
             if not Path(attachment.path).exists():
                 continue
             coverage_attachments.append(attachment)
@@ -330,8 +342,8 @@ def merge_period_results(
     def related(message_id: str, evidence_id: str) -> bool:
         return (
             message_id == evidence_id or
-            message_id.startswith(evidence_id) or
-            evidence_id.startswith(message_id)
+            message_id.startswith(f"{evidence_id}:") or
+            evidence_id.startswith(f"{message_id}:")
         )
 
     incomplete: list[WhatsAppAlbumStatus] = []
@@ -339,7 +351,12 @@ def merge_period_results(
         if evidence.image_count <= 0:
             continue
         captured = len({
-            attachment.sha256 or attachment.path
+            (
+                re.search(r"foto_(\d+)", attachment.filename, re.IGNORECASE).group(1)
+                if re.search(r"foto_(\d+)", attachment.filename, re.IGNORECASE)
+                else attachment.filename.casefold(),
+                attachment.sha256 or attachment.path,
+            )
             for attachment in coverage_attachments
             if related(attachment.message_id, evidence.message_id)
         })

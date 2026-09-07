@@ -622,6 +622,14 @@ function wlCollectInventoryFromRows(panel, config, knownIds, dateState = null) {
           .map((name) => name.trim().replace(/^PDF\s+/i, ""))
       )
     ));
+    const pdfSources = Array.from(new Set(
+      Array.from(element.querySelectorAll('a[href]'))
+        .filter((link) => /\.pdf\b|pdf|baixar|download/i.test(
+          `${link.href || ""} ${link.textContent || ""} ${link.getAttribute("aria-label") || ""}`
+        ))
+        .map((link) => link.href)
+        .filter((source) => /^(blob:|https:|data:application\/pdf)/i.test(source))
+    ));
     const stakeMatch = text.match(/\b\d+(?:\s*[x\u00d7]\s*\d+)+(?:\s*[+=]\s*\d+)\b/i);
     const stakeText = stakeMatch ? stakeMatch[0] : "";
     const quantityHint = imageCount && !stakeText
@@ -638,7 +646,9 @@ function wlCollectInventoryFromRows(panel, config, knownIds, dateState = null) {
     const sender = (firstButton?.innerText || firstButton?.textContent || "").trim();
     const idElement = element.querySelector("[data-id]") || element.closest("[data-id]");
     const messageId = idElement?.getAttribute("data-id") ||
-      `wl-${currentDate}-${messageTime}-${wlSimpleHash(`${sender}|${text}|${index}`)}`;
+      `wl-${currentDate}-${messageTime}-${wlSimpleHash(
+        `${sender}|${wlMessageCaptionText(element, text)}|${imageCount}|${pdfNames.join("|")}`
+      )}`;
     const albumIdMatch = /^album-.*-(\d+)$/.exec(messageId);
     if (albumIdMatch) imageCount = Math.max(imageCount, Number(albumIdMatch[1]));
     if (knownIds.has(messageId)) continue;
@@ -653,6 +663,7 @@ function wlCollectInventoryFromRows(panel, config, knownIds, dateState = null) {
       image_sources: imageSources,
       media_elements: mediaButtons,
       pdf_names: pdfNames,
+      pdf_sources: pdfSources,
       stake_text: stakeText,
       quantity_hint: quantityHint,
       has_ok: accessible.includes("\u{1F197}"),
@@ -711,6 +722,14 @@ function wlCollectInventory(panel, config, options = {}) {
           .map((name) => name.trim().replace(/^PDF\s+/i, ""));
       })
     ));
+    const pdfSources = Array.from(new Set(
+      Array.from(bubble.querySelectorAll('a[href]'))
+        .filter((link) => /\.pdf\b|pdf|baixar|download/i.test(
+          `${link.href || ""} ${link.textContent || ""} ${link.getAttribute("aria-label") || ""}`
+        ))
+        .map((link) => link.href)
+        .filter((source) => /^(blob:|https:|data:application\/pdf)/i.test(source))
+    ));
     const stakeMatch = text.match(/\b\d+(?:\s*[x\u00d7]\s*\d+)+(?:\s*[+=]\s*\d+)\b/i);
     const stakeText = stakeMatch ? stakeMatch[0] : "";
     const quantityHint = imageCount && !stakeText
@@ -720,7 +739,11 @@ function wlCollectInventory(panel, config, options = {}) {
 
     const idElement = metadata.closest("[data-id]") || bubble.querySelector("[data-id]");
     const messageId = idElement?.getAttribute("data-id") ||
-      `wl-${messageDate}-${messageTime}-${wlSimpleHash(`${sender}|${text}|${index}`)}`;
+      // DOM indexes change while WhatsApp virtualizes the chat. Keep the
+      // fallback reproducible across scrolling/restarts.
+      `wl-${messageDate}-${messageTime}-${wlSimpleHash(
+        `${sender}|${wlMessageCaptionText(bubble, text)}|${imageCount}|${pdfNames.join("|")}`
+      )}`;
     const albumIdMatch = /^album-.*-(\d+)$/.exec(messageId);
     if (albumIdMatch) imageCount = Math.max(imageCount, Number(albumIdMatch[1]));
     if (seen.has(messageId)) continue;
@@ -735,6 +758,7 @@ function wlCollectInventory(panel, config, options = {}) {
       image_sources: imageSources,
       media_elements: mediaButtons,
       pdf_names: pdfNames,
+      pdf_sources: pdfSources,
       stake_text: stakeText,
       quantity_hint: quantityHint,
       has_ok: accessible.includes("\u{1F197}"),
@@ -762,13 +786,14 @@ function wlSummarizeInventory(inventory) {
   const uniqueInventory = wlRemoveAlbumDuplicates(inventory);
   const publicInventory = uniqueInventory.map(({
     image_sources: _sources,
+    pdf_sources: _pdfSources,
     media_elements: _elements,
     ...item
   }) => item);
   const stakes = uniqueInventory.map((item) => item.stake_text).filter(Boolean);
   const incompleteAlbums = uniqueInventory
     .filter((item) =>
-      item.image_count > 1 &&
+      item.image_count > 0 &&
       Number(item.album_captured_count || 0) < item.image_count
     )
     .map((item) => ({
@@ -822,6 +847,7 @@ function wlAttachmentExtension(mimeType) {
   if (normalized.includes("png")) return "png";
   if (normalized.includes("webp")) return "webp";
   if (normalized.includes("gif")) return "gif";
+  if (normalized.includes("pdf")) return "pdf";
   return "jpg";
 }
 
@@ -846,7 +872,7 @@ function wlSendAttachment(payload) {
   });
 }
 
-async function wlUploadAttachment(config, item, source, sourceIndex) {
+async function wlUploadAttachment(config, item, source, sourceIndex, filename = "") {
   const controller = new AbortController();
   const abortTimer = setTimeout(() => controller.abort(), 12000);
   let response;
@@ -870,7 +896,7 @@ async function wlUploadAttachment(config, item, source, sourceIndex) {
     session_id: config.session_id,
     token: config.token,
     message_id: item.message_id,
-    filename: `foto_${sourceIndex + 1}.${wlAttachmentExtension(mimeType)}`,
+    filename: filename || `foto_${sourceIndex + 1}.${wlAttachmentExtension(mimeType)}`,
     mime_type: mimeType,
     base64,
   };
@@ -1213,6 +1239,24 @@ async function wlUploadInventoryAttachments(items, config, uploadedSources) {
     () => worker()
   );
   await Promise.all(workers);
+  // Documents are independent from gallery positions. Download each visible
+  // PDF URL once and preserve the message relationship.
+  for (const item of items) {
+    for (const [pdfIndex, source] of (item.pdf_sources || []).entries()) {
+      if (uploadedSources.has(source)) continue;
+      uploadedSources.add(source);
+      const expectedName = item.pdf_names?.[pdfIndex] || `documento_${pdfIndex + 1}.pdf`;
+      try {
+        const uploaded = await wlUploadAttachment(
+          config, item, source, item.image_count + pdfIndex, expectedName
+        );
+        if (!uploaded) uploadedSources.delete(source);
+      } catch (error) {
+        wlAttachmentErrors.push(String(error?.message || error));
+        uploadedSources.delete(source);
+      }
+    }
+  }
   for (const item of items) {
     const direct = Math.max(
       directCounts.get(item.message_id) || 0,
@@ -1224,6 +1268,19 @@ async function wlUploadInventoryAttachments(items, config, uploadedSources) {
       );
     }
   }
+}
+
+function wlCheckpointInventory(inventory, base, message) {
+  // Persist the inventory before opening a gallery. If WhatsApp navigation
+  // fails afterwards, the local app still knows exactly which media is owed.
+  wlPost({
+    ...base,
+    final: false,
+    group_found: true,
+    start_date_found: true,
+    ...wlSummarizeInventory(inventory),
+    message,
+  });
 }
 
 function wlCollectEvidence(panel, config) {
@@ -1258,6 +1315,9 @@ async function wlCollectPeriodEvidence(panel, config, base) {
     const batch = wlCollectInventory(panel, config, { seen, date_state: dateState });
     inventory.push(...batch);
     for (const label of wlVisibleChronologyDates(panel)) chronologyDates.add(label);
+    if (batch.length) {
+      wlCheckpointInventory(inventory, base, "Inventário salvo; copiando anexos pendentes.");
+    }
     await wlUploadInventoryAttachments(batch, config, uploadedSources);
 
     if (!jumpToRecent) {
@@ -1349,6 +1409,9 @@ async function wlCollectPeriodEvidence(panel, config, base) {
     dateState.current_date = dateFound ? label : "";
     const calendarBatch = wlCollectInventory(panel, config, { seen, date_state: dateState });
     inventory.push(...calendarBatch);
+    if (calendarBatch.length) {
+      wlCheckpointInventory(inventory, base, `Inventário de ${label} salvo; copiando anexos.`);
+    }
     await wlUploadInventoryAttachments(calendarBatch, config, uploadedSources);
     wlPost({
       ...base,
@@ -1440,6 +1503,9 @@ async function wlCollectCalendarPeriodEvidence(panel, config, base) {
     }
     const initialBatch = initialVisible.filter((item) => item.message_date === label);
     inventory.push(...initialBatch);
+    if (initialBatch.length) {
+      wlCheckpointInventory(inventory, base, `Inventário de ${label} salvo; copiando anexos.`);
+    }
     await wlUploadInventoryAttachments(initialBatch, config, uploadedSources);
 
     if (dateFound) {
@@ -1462,6 +1528,9 @@ async function wlCollectCalendarPeriodEvidence(panel, config, base) {
         }
         const scrollBatch = visibleBatch.filter((item) => item.message_date === label);
         inventory.push(...scrollBatch);
+        if (scrollBatch.length) {
+          wlCheckpointInventory(inventory, base, `Novas evidências de ${label} salvas.`);
+        }
         await wlUploadInventoryAttachments(scrollBatch, config, uploadedSources);
         if (Math.abs(afterTop - beforeTop) >= 1 && !crossedIntoLaterDate) {
           localScrollMoves += 1;
@@ -1540,6 +1609,9 @@ async function wlCollectSequentialPeriodEvidence(panel, config, base) {
     panel = document.querySelector('[data-testid="conversation-panel-messages"]') || panel;
     const batch = wlCollectInventory(panel, config, { seen, date_state: dateState });
     inventory.push(...batch);
+    if (batch.length) {
+      wlCheckpointInventory(inventory, base, "Inventário salvo; copiando anexos pendentes.");
+    }
     await wlUploadInventoryAttachments(batch, config, uploadedSources);
 
     if (move % 2 === 0 || batch.length) {

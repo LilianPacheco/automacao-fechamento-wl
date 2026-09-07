@@ -16,6 +16,7 @@ class ConsolidatedRow:
     unit_volume: float | None
     cargo_type: str
     source_count: int
+    source_ids: tuple[str, ...] = ()
 
 
 def _text_key(value: str) -> str:
@@ -37,9 +38,14 @@ def group_approved_drafts(drafts: list[LabelDraft]) -> list[ConsolidatedRow]:
             _text_key(draft.cargo_type),
         )
         if key not in grouped:
-            grouped[key] = {"draft": draft, "quantity": 0, "source_count": 0}
+            grouped[key] = {
+                "draft": draft, "quantity": 0, "source_count": 0,
+                "source_ids": [],
+            }
         grouped[key]["quantity"] = float(grouped[key]["quantity"]) + draft.quantity
         grouped[key]["source_count"] = int(grouped[key]["source_count"]) + 1
+        source_id = draft.record_id or f"legacy:{draft.message_id}:{draft.source_path}"
+        grouped[key]["source_ids"].append(source_id)
 
     rows: list[ConsolidatedRow] = []
     for item in grouped.values():
@@ -56,6 +62,7 @@ def group_approved_drafts(drafts: list[LabelDraft]) -> list[ConsolidatedRow]:
             unit_volume=draft.unit_volume,
             cargo_type=draft.cargo_type,
             source_count=int(item["source_count"]),
+            source_ids=tuple(dict.fromkeys(str(value) for value in item["source_ids"])),
         ))
     return sorted(rows, key=lambda row: (
         row.message_date, row.type_name.casefold(), row.work.casefold(), row.piece.casefold()

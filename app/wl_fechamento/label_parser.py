@@ -429,6 +429,12 @@ class LabelDraft:
     status: str = "PENDENTE"
     warnings: list[str] = field(default_factory=list)
     ocr_text: str = ""
+    # Stable identity of one logical spreadsheet launch.  Unlike source_path,
+    # this also distinguishes multiple rows parsed from the same document.
+    record_id: str = ""
+    # Fields explicitly changed in the review UI. OCR refreshes must preserve
+    # these values until the operator chooses to replace them.
+    manual_fields: list[str] = field(default_factory=list)
 
 
 def parse_label_text(
